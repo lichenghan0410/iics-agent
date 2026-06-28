@@ -1,25 +1,176 @@
+#!/usr/bin/env python3
 """
 iics_cli.py — Mode A 入口：Claude Code CLI 通过 bash 调用的 CLI 子命令
 
-v0.1 Read-only MVP 占位文件。
-Implementation starts in later steps (Step 9 完成 Mode A)。
+v0.1 Read-only MVP。Step 9 implements 4 个只读子命令，完成 Mode A。
 
-子命令占位（实现于 Step 9）:
+Session token:
+  export IICS_SESSION_TOKEN="<USER_SESSION 值>"
+
+子命令:
   python iics_cli.py list-tasks <folder> [--type DSS|MTT|WORKFLOW|ALL] [--page-size N]
   python iics_cli.py get-task <task_name> <task_type> [--folder PATH] [--no-resolve]
   python iics_cli.py resolve-connection <id> [<id>...]
-  python iics_cli.py export <folder> [--type ALL] [--format excel|json] [--filename NAME]
+  python iics_cli.py export <folder> [--type ALL] [--details|--summary-only]
+                       [--format excel|json] [--filename NAME]
 
-行为约定（实现于 Step 9）:
+行为约定:
   - stdout 只输出 JSON；stderr 输出人类可读日志
-  - IICS_SESSION_TOKEN 未设置时 stdout 报错并 sys.exit(1)
-  - 工具返回 {"error": ...} 时 sys.exit(1)
-
-安全边界:
-  - v0.1 只读，不实现任何写 / update / batch 子命令
-  - 不得输出、保存或泄露 IICS_SESSION_TOKEN
-
-本文件当前不实现任何 IICS API 调用逻辑。
+  - IICS_SESSION_TOKEN 未设置 / 工具返回 {"error":...} / 异常 → 退出码 1
+  - 成功 → 退出码 0
+  - 不打印 / 不保存 / 不泄露 token；不读取 IICS_USER / IICS_PASS；不调用 login API
+  - 工具逻辑全部复用 tools/query.py 与 tools/exporter.py，CLI 不重复实现
 """
 
-# TODO(Step 9): argparse 子命令 list-tasks / get-task / resolve-connection / export
+import argparse
+import json
+import os
+import sys
+
+from iics_client import SessionManager, IICSClient
+from tools.query import list_tasks, get_task_detail, resolve_connection
+from tools.exporter import export_results
+
+
+def create_client() -> IICSClient:
+    """从环境变量构造只读 client；token 缺失抛 ValueError。不打印/保存 token。"""
+    token = os.environ.get("IICS_SESSION_TOKEN", "").strip()
+    if not token:
+        raise ValueError("IICS_SESSION_TOKEN 未设置")
+    session = SessionManager.from_sso_token(token)
+    return IICSClient(session)
+
+
+def print_json(result: dict) -> None:
+    """stdout 只输出 JSON。"""
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def _log(msg: str) -> None:
+    """人类可读日志 → stderr，避免污染 stdout JSON。"""
+    print(f"[IICS CLI] {msg}", file=sys.stderr)
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="iics_cli.py",
+        description="Takeda Japan IICS 运维工具（v0.1 只读）",
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    # list-tasks
+    p_list = sub.add_parser("list-tasks", help="枚举文件夹下的 task")
+    p_list.add_argument("folder")
+    p_list.add_argument(
+        "--type", default="ALL", choices=["DSS", "MTT", "WORKFLOW", "ALL"]
+    )
+    p_list.add_argument("--page-size", type=int, default=200)
+
+    # get-task
+    p_get = sub.add_parser("get-task", help="获取单个 task 详情")
+    p_get.add_argument("name")
+    p_get.add_argument("type", choices=["DSS", "MTT", "WORKFLOW"])
+    p_get.add_argument("--folder", default="")
+    p_get.add_argument("--no-resolve", action="store_true")
+
+    # resolve-connection
+    p_res = sub.add_parser("resolve-connection", help="解析 connection id 为名称")
+    p_res.add_argument("ids", nargs="+")
+
+    # export
+    p_exp = sub.add_parser("export", help="导出文件夹 task 为 Excel / JSON")
+    p_exp.add_argument("folder")
+    p_exp.add_argument(
+        "--type", default="ALL", choices=["DSS", "MTT", "WORKFLOW", "ALL"]
+    )
+    p_exp.add_argument("--details", action="store_true", default=True)
+    p_exp.add_argument("--summary-only", action="store_true")
+    p_exp.add_argument("--format", default="excel", choices=["excel", "json"])
+    p_exp.add_argument("--filename", default="")
+
+    return parser
+
+
+def _cmd_list_tasks(client, args) -> dict:
+    _log(f"running list-tasks {args.folder} type={args.type}")
+    return list_tasks(
+        client,
+        folder_path=args.folder,
+        task_type=args.type,
+        page_size=args.page_size,
+    )
+
+
+def _cmd_get_task(client, args) -> dict:
+    _log(f"running get-task {args.name} {args.type} folder={args.folder}")
+    return get_task_detail(
+        client,
+        task_name=args.name,
+        task_type=args.type,
+        folder_path=args.folder,
+        resolve_connections=not args.no_resolve,
+    )
+
+
+def _cmd_resolve_connection(client, args) -> dict:
+    _log(f"running resolve-connection {args.ids}")
+    return resolve_connection(client, connection_ids=args.ids)
+
+
+def _cmd_export(client, args) -> dict:
+    _log(f"running export {args.folder} type={args.type} format={args.format}")
+    list_result = list_tasks(client, folder_path=args.folder, task_type=args.type)
+    if isinstance(list_result, dict) and "error" in list_result:
+        return list_result
+
+    details = []
+    if not args.summary_only:
+        for task in list_result.get("tasks", []):
+            name = task.get("name", "")
+            ttype = task.get("type", "")
+            _log(f"  fetching detail: {name} ({ttype})")
+            detail = get_task_detail(
+                client,
+                task_name=name,
+                task_type=ttype,
+                folder_path=args.folder,
+            )
+            details.append(detail)  # 错误对象也保留，不中断 export
+
+    data = {
+        "folder": args.folder,
+        "tasks": list_result.get("tasks", []),
+        "details": details,
+    }
+    return export_results(
+        client, data=data, format=args.format, filename=args.filename
+    )
+
+
+_DISPATCH = {
+    "list-tasks": _cmd_list_tasks,
+    "get-task": _cmd_get_task,
+    "resolve-connection": _cmd_resolve_connection,
+    "export": _cmd_export,
+}
+
+
+def main(argv=None) -> int:
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    try:
+        client = create_client()
+        handler = _DISPATCH[args.command]
+        result = handler(client, args)
+    except Exception as e:  # noqa: BLE001 — 顶层统一结构化错误
+        print_json({"error": str(e), "error_type": type(e).__name__})
+        return 1
+
+    print_json(result)
+    if isinstance(result, dict) and "error" in result:
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

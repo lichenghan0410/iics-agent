@@ -75,24 +75,44 @@ v0.1 的自动化测试分两层，本手册覆盖**集成层（真实 API 冒�
 
 ---
 
+## 4.0 直接 PowerShell 预检（先于 Claude Code）
+
+进入 Claude Code CLI 之前，**先在纯 PowerShell 里直接跑一遍冒烟测试**，把
+「代码 / API / token 问题」与「Claude Code 工具权限 / 自然语言调度问题」分开定位：
+
+```powershell
+Set-Location -LiteralPath "D:\IICS Agent"
+git status --short          # 测试前：应只在末尾可能出现导出 .xlsx（被忽略，不入跟踪）
+python smoke_test.py
+git status --short          # 测试后：不应出现任何源码改动
+```
+
+若 `python smoke_test.py` 在此步失败，**先不要进入 Claude Code**，按第 7 节自行排查
+token、路径、权限、V3 path、`pageSize` 等问题。只有这一步通过，才继续 §4。
+
+---
+
 ## 4. 用 Claude Code CLI 运行（Mode A 推荐启动方式）
 
 Mode A 的核心是让 `claude` CLI 读取项目 `CLAUDE.md`，用自然语言驱动 `iics_cli.py`。
-按 ADR D-1 的只读权限边界启动：
+按 ADR D-1 的只读权限边界启动。**推荐用逗号分隔的单参数形式**（不同版本 CLI 对
+`--allowedTools` 后跟多个独立字符串的解析行为不一致，单参数更稳）：
 
 ```powershell
 Set-Location -LiteralPath "D:\IICS Agent"
 
 claude `
-  --tools "Bash,Read" `
-  --allowedTools "Bash(python iics_cli.py *)" "Bash(python smoke_test.py)" "Read" `
-  --disallowedTools "Edit" "Write" "Bash(curl *)"
+  --allowedTools "Bash(python iics_cli.py *),Bash(python smoke_test.py),Read" `
+  --disallowedTools "Edit,Write,Bash(curl *)"
 ```
 
-- `--tools` 限制可见工具集合为 `Bash,Read`。
-- `--allowedTools` 让 `python iics_cli.py *` 与 `python smoke_test.py` 免确认自动执行。
-- `--disallowedTools` 拒绝 `Edit`/`Write`/`curl`，强化只读边界。
+- `--allowedTools`：让 `python iics_cli.py *` 与 `python smoke_test.py` 免确认自动执行。
+- `--disallowedTools`：拒绝 `Edit`/`Write`/`curl`，强化只读边界。
+- 可选：再加 `--tools "Bash,Read"` 进一步限制可见工具集合（非 ADR 必需项）。
 - **不要**使用 `--dangerously-skip-permissions`。
+
+> 权限 ≠ 沙箱：禁用 `Edit`/`Write` 不代表 Bash 完全无法改文件（重定向、生成产物仍可能）。
+> 权限控制与 §6 的 `git status` 检查是互补的，不能互相替代。
 
 进入 `claude` 会话后，可用自然语言触发（CLI 会自动生成对应 bash 调用）：
 
@@ -150,6 +170,16 @@ echo "exit=$LASTEXITCODE"
 > stdout 永远只应出现 JSON；进度/`[IICS CLI]` 日志走 stderr。若 stdout 混入非 JSON，
 > 视为缺陷。
 
+### 5.3 测试后状态检查
+
+```powershell
+git status --short
+```
+
+期望：不出现任何源码（`.py` / `.md`）改动；导出的 `.xlsx` 即便存在也应处于未跟踪且被
+`.gitignore` 忽略状态（不会被 `git add .` 误纳入）。若出现源码改动，说明测试过程意外修改了
+文件，需排查后回退。
+
 ---
 
 ## 6. 验收口径（DoD）
@@ -171,6 +201,7 @@ v0.1 **完成**当且仅当全部满足：
       `Field Mapping` / `Truncation Risk` 三个 sheet。
 - [ ] 四个子命令成功时退出码 0，工具返回 `{"error":...}` 时退出码 1。
 - [ ] 全程无 token 出现在 stdout / 文件 / git。
+- [ ] 测试结束后 `git status --short` 不应出现源码改动；导出的 `.xlsx` 不应被 git 跟踪。
 
 ---
 

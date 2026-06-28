@@ -1,0 +1,4 @@
+# Python >= 3.10 required
+# Mode A: Claude Code CLI
+requests>=2.31.0
+openpyxl>=3.1.0

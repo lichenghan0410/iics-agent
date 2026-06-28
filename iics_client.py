@@ -20,6 +20,8 @@ from typing import Optional
 
 import requests
 
+from cache.connection_cache import ConnectionCache
+
 # ── 模块级常量 ──────────────────────────────────────────────────────────────
 LOGIN_URL = os.environ.get(
     "IICS_LOGIN_URL",
@@ -137,6 +139,7 @@ class IICSClient:
 
     def __init__(self, session: SessionManager):
         self.session = session
+        self.connection_cache = ConnectionCache()
 
     def _request(
         self,

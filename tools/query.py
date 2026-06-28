@@ -4,8 +4,9 @@ tools/query.py — 只读查询工具：list_tasks / get_task_detail / resolve_c
 v0.1 Read-only MVP。
 Step 5 implements normalize_task_type / list_tasks（V3 枚举 + 自动分页）。
 Step 6 implements get_task_detail + extract_runtime_agent / extract_connection_ids
-（V3 同名消歧 + V2 detail 路由 + best-effort 抽取；不调用 Step 7 的 resolve_connection）。
-resolve_connection（Step 7）尚未实现。
+（V3 同名消歧 + V2 detail 路由 + best-effort 抽取）。
+Step 7 implements resolve_connection（V2 connection/<id> + ConnectionCache），并把
+get_task_detail(resolve_connections=True) 接入真实 connection name 解析。
 
 约定:
   - 每个工具函数接收 client: IICSClient 作为第一个参数
@@ -284,9 +285,58 @@ def get_task_detail(
             "unresolved_connection_fields": conn["unresolved_connection_fields"],
             "raw": raw,
         }
+
+        # ── Step 7：接入真实 connection name 解析 ─────────────────────────
+        if resolve_connections and detail["connection_ids"]:
+            res = resolve_connection(client, detail["connection_ids"])
+            resolved_map = res.get("resolved", {})
+            detail["resolved_connections"] = resolved_map
+            if res.get("failed"):
+                detail["connection_resolve_failed"] = res["failed"]
+            src_id = detail["source_connection"]["id"]
+            tgt_id = detail["target_connection"]["id"]
+            if src_id in resolved_map:
+                detail["source_connection"]["name"] = resolved_map[src_id]
+            if tgt_id in resolved_map:
+                detail["target_connection"]["name"] = resolved_map[tgt_id]
+
         return detail
     except Exception as e:  # noqa: BLE001 — 工具层统一结构化错误
         return {"error": str(e), "error_type": type(e).__name__}
 
 
-# TODO(Step 7): def resolve_connection(client, connection_ids: list[str]) -> dict
+def resolve_connection(client, connection_ids: list) -> dict:
+    """把 connection id 解析成 connection name（V2 connection/<id>，带缓存）。
+
+    返回: {"resolved": {id: name}, "failed": [id, ...]}
+    单个 id 失败不影响其他 id；整体不向上抛异常。
+    """
+    if not connection_ids or not isinstance(connection_ids, list):
+        return {"resolved": {}, "failed": []}
+
+    # 去重保序、跳过空值
+    ordered = []
+    for cid in connection_ids:
+        if cid and isinstance(cid, str) and cid not in ordered:
+            ordered.append(cid)
+
+    resolved = {}
+    failed = []
+
+    def _fetch(cid):
+        resp = client._request("GET", f"connection/{cid}", use_v3=False)
+        data = resp.json()
+        return data.get("name") or data.get("connectionName") or data.get("id") or ""
+
+    for cid in ordered:
+        try:
+            cache = getattr(client, "connection_cache", None)
+            if cache is not None:
+                name = cache.get_or_fetch(cid, _fetch)
+            else:
+                name = _fetch(cid)
+            resolved[cid] = name
+        except Exception:  # noqa: BLE001 — 单 id 失败记入 failed，继续
+            failed.append(cid)
+
+    return {"resolved": resolved, "failed": failed}

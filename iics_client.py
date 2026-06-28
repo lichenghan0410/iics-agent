@@ -5,7 +5,8 @@ v0.1 Read-only MVP。
 Step 2 only implements SessionManager (from_sso_token / from_env /
 server_url / headers_v2 / headers_v3 / handle_401)。
 Step 3 implements URL factory (build_v2_url / build_v3_url)。
-IICSClient._request() 的真实 HTTP 请求逻辑在 Step 4 实现。
+Step 4 implements IICSClient._request()（GET-only，V2/V3 URL + Header 注入，
+401 调用 handle_401 并最多重试一次）。
 
 安全边界（v0.1）:
   - 只读模式，禁止任何写路径（POST/PUT/PATCH/DELETE 业务调用）
@@ -16,6 +17,8 @@ IICSClient._request() 的真实 HTTP 请求逻辑在 Step 4 实现。
 import os
 from dataclasses import dataclass
 from typing import Optional
+
+import requests
 
 # ── 模块级常量 ──────────────────────────────────────────────────────────────
 LOGIN_URL = os.environ.get(
@@ -128,12 +131,51 @@ class SessionManager:
 
 # ── IICSClient ───────────────────────────────────────────────────────────────
 class IICSClient:
-    """共享 HTTP 客户端。v0.1 占位：_request 真实逻辑在 Step 4 实现。"""
+    """共享 HTTP 客户端。v0.1 只读：_request 仅支持 GET。"""
+
+    session: SessionManager
 
     def __init__(self, session: SessionManager):
         self.session = session
 
-    def _request(self, *args, **kwargs):
-        raise NotImplementedError(
-            "IICSClient._request will be implemented in Step 4"
-        )
+    def _request(
+        self,
+        method: str,
+        path: str,
+        use_v3: bool = False,
+        **kwargs,
+    ) -> requests.Response:
+        """发出 IICS GET 请求。
+
+        - 按 use_v3 选择 URL 工厂与 Header（V3: INFA-SESSION-ID / V2: icSessionId）
+        - 查询参数须经 kwargs 的 params 传入，禁止在 path 内拼 query string
+        - 401 时调用 session.handle_401()，最多重试一次；非 401 错误 raise_for_status()
+        - 成功返回 requests.Response，调用方负责 .json()
+        """
+        method = method.upper()
+        if method != "GET":
+            raise ValueError("v0.1 only supports GET requests")
+        if not path:
+            raise ValueError("path is required")
+
+        if use_v3:
+            url = build_v3_url(self.session.server_url, path)
+            default_headers = self.session.headers_v3()
+        else:
+            url = build_v2_url(self.session.server_url, path)
+            default_headers = self.session.headers_v2()
+
+        # 调用方 headers 覆盖默认 headers
+        caller_headers = kwargs.pop("headers", None)
+        headers = dict(default_headers)
+        if caller_headers:
+            headers.update(caller_headers)
+
+        # 最多两次 attempt：attempt 0 → 401 → handle_401() → attempt 1
+        response = requests.request(method, url, headers=headers, **kwargs)
+        if response.status_code == 401:
+            self.session.handle_401()  # v0.1 直接抛 RuntimeError，不会到达下一行
+            response = requests.request(method, url, headers=headers, **kwargs)
+
+        response.raise_for_status()
+        return response

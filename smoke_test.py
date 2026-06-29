@@ -23,6 +23,12 @@ from tools.exporter import export_results
 
 
 def main() -> int:
+    # 避免在 GBK/cp936 控制台打印 ✅ 等字符时 UnicodeEncodeError
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
     token = os.environ.get("IICS_SESSION_TOKEN", "").strip()
     if not token:
         print("ERROR: IICS_SESSION_TOKEN 未设置，无法运行冒烟测试。", file=sys.stderr)
@@ -41,8 +47,8 @@ def main() -> int:
         == "https://use4.dm-us.informaticacloud.com/saas/api/v2/dsstask/name/X"
     )
     assert (
-        build_v3_url(session.server_url, "api/v3/objects")
-        == "https://use4.dm-us.informaticacloud.com/api/v3/objects"
+        build_v3_url(session.server_url, "public/core/v3/objects")
+        == "https://use4.dm-us.informaticacloud.com/saas/public/core/v3/objects"
     )
     assert (
         build_v2_url("https://use4.dm-us.informaticacloud.com/saas", "connection/123")

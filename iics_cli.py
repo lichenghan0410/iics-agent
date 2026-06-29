@@ -156,6 +156,12 @@ _DISPATCH = {
 
 
 def main(argv=None) -> int:
+    # 保证非 ASCII（中文/符号）JSON 在 GBK/cp936 控制台也能正常输出
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
     parser = _build_parser()
     args = parser.parse_args(argv)
     try:

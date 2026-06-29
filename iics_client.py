@@ -34,7 +34,7 @@ DEFAULT_SERVER_URL = "https://use4.dm-us.informaticacloud.com"
 # ── URL 工厂（模块级函数）────────────────────────────────────────────────────
 # 调用约定:
 #   - V2 path 传业务资源路径，如 "dsstask/name/X" / "connection/123"（不含 saas/api/v2 前缀）
-#   - V3 path 传 "api/v3/objects" 等
+#   - V3 path 传 "public/core/v3/objects" 等（V3 public API 同样位于 /saas 下）
 #   - 查询参数（?q=...）不在此处拼接，由 Step 4 _request(..., params={...}) 传入
 def build_v2_url(server_url: str, path: str) -> str:
     """构建 V2 URL，集中处理 serverUrl 是否已含 /saas 后缀，防止 /saas/saas/ 重复。"""
@@ -53,7 +53,9 @@ def build_v2_url(server_url: str, path: str) -> str:
 
 
 def build_v3_url(server_url: str, path: str) -> str:
-    """构建 V3 URL，serverUrl 含 /saas 后缀时去除，再拼接 V3 path。"""
+    """构建 V3 URL。实测：IICS V3 public API 与 V2 一样位于 /saas 下
+    （正确端点 /saas/public/core/v3/objects），故确保 /saas 前缀、不重复。
+    """
     if not server_url:
         raise ValueError("server_url is required")
     if not path:
@@ -63,9 +65,9 @@ def build_v3_url(server_url: str, path: str) -> str:
     clean_path = path.lstrip("/")
 
     if base.endswith("/saas"):
-        base = base[:-5]
+        return f"{base}/{clean_path}"
 
-    return f"{base}/{clean_path}"
+    return f"{base}/saas/{clean_path}"
 
 
 # ── SessionManager ───────────────────────────────────────────────────────────

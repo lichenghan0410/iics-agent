@@ -4,7 +4,8 @@ tools/query.py — 只读查询工具：list_tasks / get_task_detail / resolve_c
 v0.1 Read-only MVP。
 Step 5 implements normalize_task_type / list_tasks（V3 枚举 + 自动分页）。
 Step 6 implements get_task_detail + extract_runtime_agent / extract_connection_ids
-（V3 同名消歧 + V2 detail 路由 + best-effort 抽取）。
+（V2 by-name detail 路由 + best-effort 抽取；实测 V3 q 不支持 name/path，故 v0.1
+不做按名消歧）。
 Step 7 implements resolve_connection（V2 connection/<id> + ConnectionCache），并把
 get_task_detail(resolve_connections=True) 接入真实 connection name 解析。
 
@@ -29,6 +30,18 @@ _TASK_TYPE_MAP = {
 
 _VALID_TASK_TYPES = {"DSS", "MTT", "WORKFLOW", "ALL"}
 
+# 实测确认的 V3 objects 枚举端点（位于 /saas 下，由 build_v3_url 补全前缀）
+_V3_OBJECTS_PATH = "public/core/v3/objects"
+
+
+def _object_name(item: dict) -> str:
+    """V3 objects 响应无 name 字段，名字为 path 末段。"""
+    name = item.get("name", "")
+    if name:
+        return name
+    path = item.get("path", "")
+    return path.split("/")[-1] if path else ""
+
 
 def normalize_task_type(raw_type: str) -> str:
     """归一化 IICS 返回的 type 字段到工具枚举（DSS/MTT/WORKFLOW）。
@@ -50,7 +63,7 @@ def list_tasks(
     task_type: str = "ALL",
     page_size: int = 200,
 ) -> dict:
-    """枚举文件夹下的 task（V3 api/v3/objects + nextPageToken 自动分页）。
+    """枚举文件夹下的 task（V3 public/core/v3/objects + nextPageToken 自动分页）。
 
     返回: {"folder": ..., "count": N, "tasks": [{name,type,id,status}, ...]}
     错误: {"error": str(e), "error_type": type(e).__name__}
@@ -70,40 +83,44 @@ def list_tasks(
         }
 
     try:
-        q = f'location=="{folder_path}"'
-        if task_type != "ALL":
-            q += f' AND type=="{task_type}"'
-
+        # 实测：V3 q 仅支持 location/type；逻辑连接符须小写 and（大写 AND 返回 400）。
+        # ALL 时按三种任务类型分别查询并合并，避免混入 mapping 等非任务对象。
+        types_to_fetch = (
+            ["DSS", "MTT", "WORKFLOW"] if task_type == "ALL" else [task_type]
+        )
         tasks = []
-        next_page_token = None
-
-        while True:
-            params = {"q": q, "pageSize": page_size}
-            if next_page_token:
-                params["pageToken"] = next_page_token
-
-            resp = client._request(
-                "GET", "api/v3/objects", use_v3=True, params=params
-            )
-            data = resp.json()
-
-            items = data.get("objects")
-            if items is None:
-                items = data.get("items", [])
-
-            for item in items:
-                tasks.append(
-                    {
-                        "name": item.get("name", ""),
-                        "type": normalize_task_type(item.get("type", "")),
-                        "id": item.get("id", ""),
-                        "status": item.get("status", ""),
-                    }
+        for t in types_to_fetch:
+            q = f'location=="{folder_path}" and type=="{t}"'
+            skip = 0
+            # 实测：无 nextPageToken；pageSize 上限 200；分页用 skip 偏移。
+            while True:
+                params = {"q": q, "pageSize": page_size, "skip": skip}
+                resp = client._request(
+                    "GET", _V3_OBJECTS_PATH, use_v3=True, params=params
                 )
+                data = resp.json()
 
-            next_page_token = data.get("nextPageToken")
-            if not next_page_token:
-                break
+                items = data.get("objects")
+                if items is None:
+                    items = data.get("items", [])
+
+                for item in items:
+                    tasks.append(
+                        {
+                            "name": _object_name(item),
+                            "type": normalize_task_type(item.get("type", "")),
+                            "id": item.get("id", ""),
+                            "status": item.get("status", ""),
+                            "path": item.get("path", ""),
+                        }
+                    )
+
+                total = data.get("count")
+                skip += len(items)
+                if not items:
+                    break
+                if total is not None and skip >= total:
+                    break
 
         return {"folder": folder_path, "count": len(tasks), "tasks": tasks}
     except Exception as e:  # noqa: BLE001 — 工具层统一结构化错误，不向上抛
@@ -238,27 +255,9 @@ def get_task_detail(
         }
 
     try:
-        # ── V3 同名消歧（folder_path 非空时）──────────────────────────────
-        if folder_path:
-            resp = client._request(
-                "GET",
-                "api/v3/objects",
-                use_v3=True,
-                params={
-                    "q": f'name=="{task_name}" AND location=="{folder_path}"'
-                },
-            )
-            data = resp.json()
-            candidates = data.get("objects")
-            if candidates is None:
-                candidates = data.get("items", [])
-            if len(candidates) > 1:
-                return {
-                    "error": "同名 task 歧义",
-                    "error_type": "AmbiguousTaskError",
-                    "candidates": candidates,
-                }
-            # 0 或 1 个结果均继续走 V2 name lookup（best-effort）
+        # v0.1：实测 V3 q 仅支持 location/type，name==/path== 均返回 400，
+        # 无法低成本按名消歧；故直接走 V2 by-name 查询，folder_path 仅记录到输出。
+        # 跨文件夹同名消歧待后续有可查询标识时再实现。
 
         # ── V2 task detail 路由 ──────────────────────────────────────────
         path = _V2_DETAIL_PATH[task_type] + task_name

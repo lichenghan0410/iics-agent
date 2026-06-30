@@ -63,7 +63,7 @@ def list_tasks(
     task_type: str = "ALL",
     page_size: int = 200,
 ) -> dict:
-    """枚举文件夹下的 task（V3 public/core/v3/objects + nextPageToken 自动分页）。
+    """枚举文件夹下的 task（V3 public/core/v3/objects + skip 偏移自动分页）。
 
     返回: {"folder": ..., "count": N, "tasks": [{name,type,id,status}, ...]}
     错误: {"error": str(e), "error_type": type(e).__name__}

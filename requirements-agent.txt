@@ -1,3 +1,0 @@
-# Mode B: Cowork Interactive Agent
--r requirements.txt
-anthropic>=0.30.0

@@ -4,6 +4,15 @@ Takeda Japan IICS 运维工具，查询三个 JAPAN_* 文件夹下的 task 配�
 
 **当前阶段：v0.1 Read-only MVP（只读模式，写操作不可用）。**
 
+## 运行模式（v0.1）
+
+- **Mode A（主）**：Claude Code CLI 读取本文件作为项目上下文，根据自然语言意图自动调用
+  下方 `iics_cli.py` 子命令。
+- **Mode C（辅）**：运维人员在终端**手动**执行同一组 `iics_cli.py` 命令（与 Mode A 生成的
+  命令完全一致）。下方「可用命令」即手动调用速查。
+- **不存在 Mode B / Cowork Interactive Agent**：该模式已在 ADR Amendment 1 移除，项目不
+  实现 `iics_agent.py`，不依赖 Anthropic SDK。
+
 ## 环境准备
 
 ```bash
@@ -15,7 +24,7 @@ export IICS_SESSION_TOKEN="<USER_SESSION 值>"
 
 ## 可用命令
 
-> 以下为 v0.1 命令占位，实际实现自 Step 2–9 起逐步完成。
+> v0.1 已实现并通过真实 token smoke test。Mode A 自动生成、Mode C 手动输入，命令一致。
 
 ```bash
 python iics_cli.py list-tasks <folder> [--type DSS|MTT|WORKFLOW|ALL] [--page-size N]

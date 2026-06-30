@@ -1,4 +1,4 @@
 # Python >= 3.10 required
-# Mode A: Claude Code CLI
+# Mode A (Claude Code CLI) + Mode C (manual CLI) 共享依赖；无 Anthropic SDK
 requests>=2.31.0
 openpyxl>=3.1.0

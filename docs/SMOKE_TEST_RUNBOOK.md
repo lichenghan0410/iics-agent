@@ -1,4 +1,4 @@
-# IICS Agent v0.1 — 真实 Token 冒烟测试运行手册（Mode A / Claude Code CLI）
+# IICS Agent v0.1 — 真实 Token 冒烟测试运行手册（Mode A / Claude Code CLI；含 Mode C 手动执行）
 
 本手册定义 IICS Agent v0.1 Read-only MVP 的**验收级冒烟测试**：在 Windows 上用真实
 `IICS_SESSION_TOKEN` 通过 Claude Code CLI 驱动，验证 `iics_cli.py` 四个只读子命令与
@@ -33,7 +33,7 @@ v0.1 的自动化测试分两层，本手册覆盖**集成层（真实 API 冒�
 | Test 1 | `SessionManager` + URL factory | 纯函数 | server_url 正确、`/saas` 不重复 |
 | Test 2 | `list_tasks`（全部类型，含分页） | 集成-只读 | 返回 `tasks`，`count >= 0` |
 | Test 3 | `list_tasks`（按 type 过滤） | 集成-只读 | 返回 `tasks`，type 归一化生效 |
-| Test 4 | `get_task_detail`（V3 消歧 + V2 路由 + 抽取） | 集成-只读 | 无 error、含 `runtime_agent` |
+| Test 4 | `get_task_detail`（V2 by-name 路由 + 抽取，v0.1 不做 V3 消歧） | 集成-只读 | 无 error、含 `runtime_agent` |
 | Test 5 | `resolve_connection` + 缓存命中 | 集成-只读 | 两次解析结果一致（第二次走缓存） |
 | Test 6 | `export_results`（openpyxl 三 sheet） | 集成-本地 IO | 生成 `.xlsx` 且文件存在 |
 
@@ -95,20 +95,20 @@ token、路径、权限、V3 path、`pageSize` 等问题。只有这一步通过
 ## 4. 用 Claude Code CLI 运行（Mode A 推荐启动方式）
 
 Mode A 的核心是让 `claude` CLI 读取项目 `CLAUDE.md`，用自然语言驱动 `iics_cli.py`。
-按 ADR D-1 的只读权限边界启动。**推荐用逗号分隔的单参数形式**（不同版本 CLI 对
-`--allowedTools` 后跟多个独立字符串的解析行为不一致，单参数更稳）：
+按 ADR D-1 的只读权限边界启动。**推荐使用 `--tools` + `--allowedTools` + `--disallowedTools` 三段式权限模型。**：
 
 ```powershell
 Set-Location -LiteralPath "D:\IICS Agent"
 
 claude `
-  --allowedTools "Bash(python iics_cli.py *),Bash(python smoke_test.py),Read" `
-  --disallowedTools "Edit,Write,Bash(curl *)"
+  --tools "Bash,Read" `
+  --allowedTools "Bash(python iics_cli.py *)" "Bash(python smoke_test.py)" "Read" `
+  --disallowedTools "Edit" "Write" "Bash(curl *)"
 ```
 
-- `--allowedTools`：让 `python iics_cli.py *` 与 `python smoke_test.py` 免确认自动执行。
-- `--disallowedTools`：拒绝 `Edit`/`Write`/`curl`，强化只读边界。
-- 可选：再加 `--tools "Bash,Read"` 进一步限制可见工具集合（非 ADR 必需项）。
+- `--tools`：限制 Claude Code 可见的工具集合为 `Bash` 与 `Read`，`Edit`/`Write` 等不在其中。
+- `--allowedTools`：让 `python iics_cli.py *` 与 `python smoke_test.py` 免确认自动执行（不是可见性限制，是自动批准规则）。
+- `--disallowedTools`：对 `Bash` 内的危险调用模式做 scoped 拒绝（如 `curl`），即使 `Bash` 整体可见也会被拦截。
 - **不要**使用 `--dangerously-skip-permissions`。
 
 > 权限 ≠ 沙箱：禁用 `Edit`/`Write` 不代表 Bash 完全无法改文件（重定向、生成产物仍可能）。
@@ -154,7 +154,7 @@ python smoke_test.py
 python iics_cli.py list-tasks JAPAN_SCRM_DI --type DSS
 echo "exit=$LASTEXITCODE"   # 期望 0；有 error 时为 1
 
-# B. 详情（验证 V3 消歧 + V2 路由 + connection name 解析）
+# B. 详情（验证 V2 by-name 路由 + connection name 解析；v0.1 不做 V3 按名消歧，见 ADR Amendment 1）
 python iics_cli.py get-task <真实TASK名> DSS --folder JAPAN_SCRM_DI
 echo "exit=$LASTEXITCODE"
 
@@ -179,6 +179,28 @@ git status --short
 期望：不出现任何源码（`.py` / `.md`）改动；导出的 `.xlsx` 即便存在也应处于未跟踪且被
 `.gitignore` 忽略状态（不会被 `git add .` 误纳入）。若出现源码改动，说明测试过程意外修改了
 文件，需排查后回退。
+
+### 5.4 Mode C：手动执行（无 Claude Code CLI 时的辅模式）
+
+`iics_cli.py` 是 Mode A 与 Mode C 的共享入口，Mode C 即跳过 `claude` CLI，直接在终端手动
+输入与上面 §5.2 完全相同的子命令。适用场景：`claude` 不可用、网络隔离环境、需要写 shell
+脚本批量调用、或接入 cron 定时导出任务。详见 ADR `ADR-001-IICS-Agent-v0.1-Readonly-MVP.md`
+的 D-1「Amendment 1」说明。
+
+```powershell
+# 与 Mode A 自然语言触发后台执行的命令完全一致，手动输入即可
+Set-Location -LiteralPath "D:\IICS Agent"
+$env:IICS_SESSION_TOKEN = "<USER_SESSION 值>"
+
+python iics_cli.py list-tasks JAPAN_SCRM_DI --type DSS
+python iics_cli.py get-task <真实TASK名> DSS --folder JAPAN_SCRM_DI
+python iics_cli.py resolve-connection <真实CONN_ID>
+python iics_cli.py export JAPAN_COMMERCIAL_DWH --type ALL
+```
+
+Mode C 没有 AI 层介入，不存在 prompt injection 或模型误调用风险；安全边界与 Mode A 完全
+一致（token 处理规则相同、`iics_cli.py` 本身无写路径），不需要额外的 `--allowedTools` 类
+权限配置。
 
 ---
 

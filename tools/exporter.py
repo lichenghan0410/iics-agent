@@ -1,12 +1,12 @@
 """
-tools/exporter.py — export_results（openpyxl，3 sheet）
+tools/exporter.py — export_results（openpyxl，单 sheet）
 
-v0.1 Read-only MVP。Step 8 implements export_results（Excel 三 sheet / JSON）。
+v0.1.1：Excel 仅导出 `Task Summary` 一个 sheet（原 Field Mapping / Truncation Risk
+已移除）。JSON 导出行为不变。
 
-Excel 输出:
-  - Task Summary    : name, type, folder, runtime_agent, source_conn, target_conn, status
-  - Field Mapping   : 仅 DSS，best-effort；无法解析写注释行"字段映射不可用"
-  - Truncation Risk : best-effort；无法解析写注释行"截断风险分析不可用"
+Task Summary 列:
+  name, type, folder, runtime_agent, source_conn, target_conn,
+  source_objects, target_object, status
 """
 
 import json
@@ -22,10 +22,10 @@ _SUMMARY_HEADERS = [
     "runtime_agent",
     "source_conn",
     "target_conn",
+    "source_objects",
+    "target_object",
     "status",
 ]
-_FIELD_MAPPING_HEADERS = ["task_name", "source_field", "target_field", "type", "length"]
-_TRUNCATION_HEADERS = ["task_name", "field", "source_len", "target_len"]
 
 
 def _conn_display(conn) -> str:
@@ -33,6 +33,93 @@ def _conn_display(conn) -> str:
     if not isinstance(conn, dict):
         return ""
     return conn.get("name") or conn.get("id") or ""
+
+
+def _val_to_str(v) -> str:
+    """best-effort 把字段值转成可读字符串。
+
+    - list → 去重保序逗号分隔
+    - dict → name/objectName/label/id，否则短 JSON
+    - 其它 → str()
+    """
+    if v is None:
+        return ""
+    if isinstance(v, str):
+        return v
+    if isinstance(v, list):
+        seen = []
+        for item in v:
+            s = _val_to_str(item)
+            if s and s not in seen:
+                seen.append(s)
+        return ", ".join(seen)
+    if isinstance(v, dict):
+        for k in ("name", "objectName", "label", "id"):
+            if v.get(k):
+                return str(v[k])
+        s = json.dumps(v, ensure_ascii=False)
+        return s if len(s) <= 120 else s[:117] + "..."
+    return str(v)
+
+
+def _get_nested(raw: dict, dotted: str):
+    """按点分路径取值，缺失返回 None。"""
+    cur = raw
+    for part in dotted.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            return None
+        cur = cur[part]
+    return cur
+
+
+def extract_source_target_objects(raw: dict, task_type: str) -> dict:
+    """best-effort 从 task detail raw 中提取源/目标对象名，缺失留空、不报错。
+
+    返回: {"source_objects": "...", "target_object": "..."}
+    """
+    result = {"source_objects": "", "target_object": ""}
+    if not isinstance(raw, dict):
+        return result
+
+    if task_type == "DSS":
+        for f in ("sourceObject", "sourceObjects", "source.object", "source.objects"):
+            v = _get_nested(raw, f)
+            if v not in (None, "", [], {}):
+                result["source_objects"] = _val_to_str(v)
+                break
+        for f in ("targetObject", "target.object"):
+            v = _get_nested(raw, f)
+            if v not in (None, "", [], {}):
+                result["target_object"] = _val_to_str(v)
+                break
+    else:
+        # MTT / WORKFLOW：递归扫描 key 含 source+object / target+object 的字段
+        srcs, tgts = [], []
+
+        def _merge(bucket, s):
+            for part in s.split(", "):
+                if part and part not in bucket:
+                    bucket.append(part)
+
+        def walk(node):
+            if isinstance(node, dict):
+                for k, val in node.items():
+                    kl = k.lower()
+                    if "source" in kl and "object" in kl:
+                        _merge(srcs, _val_to_str(val))
+                    elif "target" in kl and "object" in kl:
+                        _merge(tgts, _val_to_str(val))
+                    else:
+                        walk(val)
+            elif isinstance(node, list):
+                for item in node:
+                    walk(item)
+
+        walk(raw)
+        result["source_objects"] = ", ".join(srcs)
+        result["target_object"] = ", ".join(tgts)
+
+    return result
 
 
 def _build_summary_rows(data: dict) -> list:
@@ -48,6 +135,9 @@ def _build_summary_rows(data: dict) -> list:
     for rec in records:
         if not isinstance(rec, dict):
             continue
+        objs = extract_source_target_objects(
+            rec.get("raw") or {}, rec.get("type", "")
+        )
         rows.append(
             [
                 rec.get("name", ""),
@@ -56,6 +146,8 @@ def _build_summary_rows(data: dict) -> list:
                 rec.get("runtime_agent", ""),
                 _conn_display(rec.get("source_connection")),
                 _conn_display(rec.get("target_connection")),
+                objs["source_objects"],
+                objs["target_object"],
                 rec.get("status", ""),
             ]
         )
@@ -75,7 +167,7 @@ def export_results(
     format: str = "excel",
     filename: str = "",
 ) -> dict:
-    """导出查询结果为 Excel / JSON。client 参数保留以符合契约，未使用。
+    """导出查询结果为 Excel（单 sheet Task Summary）/ JSON。client 未使用，保留契约。
 
     返回: {"file_path","format","rows","summary"} 或 {"error","error_type"}
     """
@@ -108,23 +200,11 @@ def export_results(
             )
         else:
             wb = Workbook()
-
             ws_summary = wb.active
             ws_summary.title = "Task Summary"
             ws_summary.append(_SUMMARY_HEADERS)
             for row in summary_rows:
                 ws_summary.append(row)
-
-            # Field Mapping — best-effort 最小版本
-            ws_fm = wb.create_sheet("Field Mapping")
-            ws_fm.append(_FIELD_MAPPING_HEADERS)
-            ws_fm.append(["字段映射不可用"])
-
-            # Truncation Risk — best-effort 最小版本
-            ws_tr = wb.create_sheet("Truncation Risk")
-            ws_tr.append(_TRUNCATION_HEADERS)
-            ws_tr.append(["截断风险分析不可用"])
-
             wb.save(out_path)
 
         return {

@@ -483,12 +483,11 @@ def export_results(
         "rows": 83,
         "summary": "已导出 83 条记录至 .../output.xlsx"
     }
-    Excel 输出包含 3 个 sheet:
-    - Task Summary    : name, type, folder, runtime_agent, source_conn, target_conn, status（必填）
-    - Field Mapping   : task_name, source_field, target_field, type, length（仅 DSS）
-                        best-effort：无法解析时输出空 sheet + 注释行"字段映射不可用"
-    - Truncation Risk : task_name, field, source_len, target_len（source_len > target_len 的字段）
-                        best-effort：无法解析时输出空 sheet + 注释行"截断风险分析不可用"
+    Excel 输出（v0.1.1 起仅 1 个 sheet）:
+    - Task Summary : name, type, folder, runtime_agent, source_conn, target_conn,
+                     source_objects, target_object, status
+                     source_objects / target_object 为 best-effort 抽取，缺失留空。
+    注：原 Field Mapping / Truncation Risk 两个 sheet 自 v0.1.1 起移除，暂不导出。
     """
 ```
 
@@ -736,7 +735,7 @@ print("\n✅ All smoke tests passed — v0.1 完成")
 | 5 | 实现 `list_tasks`（含自动分页）| Smoke Test 2 & 3 通过 |
 | 6 | 实现 `get_task_detail`（含同名消歧 + V2 路由）| Smoke Test 4 通过 |
 | 7 | 实现 `ConnectionCache` + `resolve_connection` | Smoke Test 5 通过（含缓存命中验证）|
-| 8 | 实现 `export_results`（openpyxl，3 sheet）| Smoke Test 6 通过，Excel 可用 Excel 打开 |
+| 8 | 实现 `export_results`（openpyxl；v0.1.1 起单 sheet Task Summary）| Smoke Test 6 通过，Excel 可用 Excel 打开 |
 | 9 | 实现 `iics_cli.py`（4 个子命令），写 `smoke_test.py` | **Mode A 完成** ✅（已通过 v0.1 真实环境验收）；**Mode C 同步可用**（同一入口，无需额外步骤） |
 
 > **已移除（Amendment 1）**：原 Step 10「实现 `iics_agent.py` 主循环」（Mode B / Cowork Interactive Agent）。理由见 D-1「取舍」一节。

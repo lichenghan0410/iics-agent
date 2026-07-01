@@ -27,7 +27,7 @@ IICS（Informatica Intelligent Cloud Services）上有数千个 task，散落在
 | 查询某文件夹下的 task 列表 | 修改 task 的 runtime / connection（v0.1 没有写路径，不是被拦截，是代码里压根不存在） |
 | 看某个 task 的完整配置详情 | 批量变更 |
 | 把 connection ID 解析成可读名称 | 自动续期 token（过期需要手动重新获取） |
-| 导出 Excel（含字段映射、截断风险分析） | 跨文件夹可靠区分同名 task（IICS API 限制，见下文） |
+| 导出 Excel（单 sheet Task Summary，含源/目标对象列） | 跨文件夹可靠区分同名 task（IICS API 限制，见下文） |
 
 ---
 
@@ -49,7 +49,7 @@ py -m pip --version
 ### 2. 安装项目依赖
 
 ```powershell
-Set-Location -LiteralPath "D:\IICS Agent"   # 改成你实际的项目路径
+Set-Location -LiteralPath "改成你实际的项目路径"   
 py -m pip install -r requirements.txt
 ```
 
@@ -335,13 +335,11 @@ python iics_cli.py export JAPAN_COMMERCIAL_DWH --type DSS
 }
 ```
 
-Excel 含 3 个 sheet：
+Excel 自 v0.1.1 起只含 1 个 sheet `Task Summary`（原 `Field Mapping` / `Truncation Risk` 已移除，暂不导出）：
 
-| Sheet | 内容 | 是否保证有数据 |
+| Sheet | 列 | 是否保证有数据 |
 |-------|------|--------------|
-| Task Summary | name / type / folder / runtime_agent / source_conn / target_conn / status | 必有 |
-| Field Mapping | 字段映射（仅 DSS） | best-effort，解析不出时为空 sheet + 提示行 |
-| Truncation Risk | 源字段长度 > 目标字段长度的截断风险清单 | best-effort，解析不出时为空 sheet + 提示行 |
+| Task Summary | name / type / folder / runtime_agent / source_conn / target_conn / source_objects / target_object / status | 必有；`source_objects` / `target_object` 为 best-effort，缺失留空 |
 
 > 一个文件夹可能有上千个 task，`--details` 模式会对每个 task 单独调用一次详情接口，文件夹大时会比较慢，预期要等。如果只是想快速看一眼有哪些 task，先用 `--summary-only`。
 
@@ -393,7 +391,7 @@ python smoke_test.py
 - **同名 task 跨文件夹无法可靠区分**：务必带 `--folder`。
 - **MTT / WORKFLOW 的 runtime / connection 字段结构未深度验证**：v0.1 主要在 DSS 上做了完整字段验证。
 - **Token 不会自动刷新**：过期后需要重新从浏览器手动获取。
-- **Excel 的 Field Mapping / Truncation Risk 两个 sheet 是 best-effort**：无法解析时不会报错，只会输出空 sheet。
+- **Excel 自 v0.1.1 起只导出单个 `Task Summary` sheet**（原 `Field Mapping` / `Truncation Risk` 已移除）；其中 `source_objects` / `target_object` 为 best-effort，缺失留空、不报错。
 
 ---
 

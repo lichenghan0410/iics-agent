@@ -51,9 +51,22 @@ python iics_cli.py export <folder> [--type ALL] [--format excel|json] [--filenam
 
 ## 运行目录
 
-所有命令必须在包含 `iics_cli.py` 的项目根目录执行：
+所有命令必须在 IICS Agent 项目根目录 执行，也就是包含以下文件的目录：
 
-```bash
-cd "D:\IICS Agent"   # 若当前不在此目录，先 cd
-python iics_cli.py list-tasks ...
-```
+iics_cli.py
+iics_client.py
+tools/
+cache/
+CLAUDE.md
+
+不要假设项目位于某个固定路径。不同使用者的安装目录可能不同，因此不得写死或自动切换到 D:\IICS Agent、C:\...、/home/... 等绝对路径。
+
+在执行任何命令前，先确认当前目录是否为项目根目录，如果当前目录正确，可以继续执行。
+
+如果以上文件不存在：
+
+不要猜测项目路径。
+不要自动搜索整个磁盘。
+不要切换到示例路径。
+请提示用户在 IICS Agent 项目根目录重新启动 Claude Code，或让用户提供实际项目路径。
+

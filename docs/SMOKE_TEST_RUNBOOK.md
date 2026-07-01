@@ -20,7 +20,7 @@ v0.1 的自动化测试分两层，本手册覆盖**集成层（真实 API 冒�
 ```
 
 - **单元层（已绿）**：URL factory、`normalize_task_type`、`list_tasks` 分页、`get_task_detail`
-  抽取、`ConnectionCache` 命中、`export_results` 三 sheet——全部用 fake client，无网络，
+  抽取、`ConnectionCache` 命中、`export_results` 单 sheet——全部用 fake client，无网络，
   Step 2–8 已逐步验证通过。
 - **集成层（本手册）**：`smoke_test.py` 的 Test 1–6，对真实 IICS 发只读 GET，验证认证、
   枚举、详情、连接解析缓存、Excel 导出端到端打通。
@@ -35,7 +35,7 @@ v0.1 的自动化测试分两层，本手册覆盖**集成层（真实 API 冒�
 | Test 3 | `list_tasks`（按 type 过滤） | 集成-只读 | 返回 `tasks`，type 归一化生效 |
 | Test 4 | `get_task_detail`（V2 by-name 路由 + 抽取，v0.1 不做 V3 消歧） | 集成-只读 | 无 error、含 `runtime_agent` |
 | Test 5 | `resolve_connection` + 缓存命中 | 集成-只读 | 两次解析结果一致（第二次走缓存） |
-| Test 6 | `export_results`（openpyxl 三 sheet） | 集成-本地 IO | 生成 `.xlsx` 且文件存在 |
+| Test 6 | `export_results`（openpyxl 单 sheet Task Summary） | 集成-本地 IO | 生成 `.xlsx` 且文件存在 |
 
 > Test 4/5 在目标文件夹无对应类型 task 时会 SKIP。正式验收前必须用
 > `IICS_TEST_TASK_NAME` 指定一个真实 task，确保 Test 4/5 实跑通过（见 §6）。
@@ -219,8 +219,9 @@ v0.1 **完成**当且仅当全部满足：
   ```
 
 - [ ] 三个文件夹各自 `list-tasks` 能返回非报错 JSON。
-- [ ] 至少一次 `export` 生成的 `.xlsx` 能用 Excel 打开，含 `Task Summary` /
-      `Field Mapping` / `Truncation Risk` 三个 sheet。
+- [ ] 至少一次 `export` 生成的 `.xlsx` 能用 Excel 打开；v0.1.1 起仅含单个
+      `Task Summary` sheet（列：name, type, folder, runtime_agent, source_conn,
+      target_conn, source_objects, target_object, status）。
 - [ ] 四个子命令成功时退出码 0，工具返回 `{"error":...}` 时退出码 1。
 - [ ] 全程无 token 出现在 stdout / 文件 / git。
 - [ ] 测试结束后 `git status --short` 不应出现源码改动；导出的 `.xlsx` 不应被 git 跟踪。

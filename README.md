@@ -350,6 +350,17 @@ Excel 自 v0.1.1 起含 2 个 sheet（原 `Field Mapping` / `Truncation Risk` �
 - **`export --details` 单个 task 失败不中断**：失败 task 记入 `failed_details`（stdout JSON 与 JSON 导出均含），并在 Excel `Export Errors` sheet 列出；`Task Summary` 仍保留该 task 一行（name/type/folder/status，其余留空）。
 - **`rows` = 本次 task 总数**（不是成功详情数），便于与 `list-tasks` 的 `count` 对比：`list-tasks count == export rows` 说明没漏 task；`failed_details_count > 0` 说明有详情没拉到，可重跑或查 `Export Errors`。
 
+#### 导出判定标准（v0.1.1 起）
+
+| 判定 | 含义 |
+|------|------|
+| `rows` | 本次导出的 task 总数，应与同参数 `list-tasks` 的 `count` 一致 |
+| `rows == list-tasks count` | 仅表示 `Task Summary` **没有丢 task**；**不代表**所有 task 详情都成功 |
+| **完整成功** | 需同时满足 `rows == list-tasks count` **且** `failed_details_count == 0` |
+| `failed_details_count > 0` | Excel 已生成，但**部分 task 详情拉取失败**：打开 `Export Errors` sheet 查看失败 task（及 `error_type`/`error`），按需**重跑该类型导出** |
+
+> 建议核对流程：先 `list-tasks --type X` 记下 `count`，再 `export --type X`，对比 stdout 的 `rows` 与 `count` 是否相等，并检查 `failed_details_count` 是否为 0。两者都满足才算该类型导出完整成功。
+
 ---
 
 ## 环境变量与参数取值

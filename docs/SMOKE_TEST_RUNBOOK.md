@@ -228,8 +228,26 @@ v0.1 **完成**当且仅当全部满足：
 
 ### 6.1 v0.1.1 稳定性验收项
 
+**导出判定标准（判断某类型导出是否完整成功）**：
+
+- `rows` 表示本次导出的 task 总数，应与同参数 `list-tasks` 的 `count` 一致。
+- `rows == list-tasks count` **只**表示 `Task Summary` 没有丢 task，**不代表**所有 task 详情都成功。
+- **完整成功** = 同时满足：`rows == list-tasks count` **且** `failed_details_count == 0`。
+- 若 `failed_details_count > 0`：Excel 已生成，但部分 task 详情拉取失败；打开 `Export Errors`
+  sheet 查看失败 task（`error_type` / `error`），按需**重跑该类型导出**。
+
+对照命令：
+
+```powershell
+python iics_cli.py list-tasks JAPAN_SCRM_DI --type DSS   # 记下 count
+python iics_cli.py export     JAPAN_SCRM_DI --type DSS   # 比对 rows 与 failed_details_count
+```
+
+验收勾选：
+
 - [ ] `export --details` 返回的 JSON 含 `rows` / `failed_details_count` / `failed_details`；
       `rows` 等于同参数 `list-tasks` 的 `count`（task 总数，非成功详情数）。
+- [ ] 判定完整成功时确认 `rows == list-tasks count` 且 `failed_details_count == 0`。
 - [ ] 若本次有详情失败：`failed_details_count > 0`，Excel `Export Errors` sheet 逐条列出
       失败 task；`Task Summary` 仍保留这些 task 的行（name/type/folder/status）。
 - [ ] 若无失败：`failed_details_count = 0`，`Export Errors` sheet 写单行 `No export errors`。

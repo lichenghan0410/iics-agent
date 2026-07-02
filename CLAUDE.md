@@ -51,22 +51,34 @@ python iics_cli.py export <folder> [--type ALL] [--format excel|json] [--filenam
 
 ## 运行目录
 
-所有命令必须在 IICS Agent 项目根目录 执行，也就是包含以下文件的目录：
+默认认为 Claude Code 已经在 IICS Agent 项目根目录启动。
 
-iics_cli.py
-iics_client.py
-tools/
-cache/
-CLAUDE.md
+如果用户在对话中明确说明“已经在项目根目录”，直接信任并执行任务，不要再用 `pwd`、`ls`、`dir`、`find` 等命令验证当前目录。
 
-不要假设项目位于某个固定路径。不同使用者的安装目录可能不同，因此不得写死或自动切换到 D:\IICS Agent、C:\...、/home/... 等绝对路径。
+不要主动搜索项目路径，不要遍历磁盘，不要猜测或切换到任何固定路径。
 
-在执行任何命令前，先确认当前目录是否为项目根目录，如果当前目录正确，可以继续执行。
+只有在命令报错提示找不到项目文件时，才允许做一次最小检查。例如：
 
-如果以上文件不存在：
+```text id="e7a3xf"
+can't open file 'iics_cli.py'
+No such file or directory
+ModuleNotFoundError: No module named 'tools'
+```
 
-不要猜测项目路径。
-不要自动搜索整个磁盘。
-不要切换到示例路径。
-请提示用户在 IICS Agent 项目根目录重新启动 Claude Code，或让用户提供实际项目路径。
+此时只检查一次 `iics_cli.py` 是否存在：
 
+```bash id="hzzqhn"
+test -f iics_cli.py
+```
+
+如果存在，继续执行原任务。
+
+如果不存在，停止执行并提示用户：
+
+```text id="nz6m42"
+当前目录似乎不是 IICS Agent 项目根目录。请在包含 iics_cli.py 的目录重新启动 Claude Code，或提供实际项目路径。
+```
+
+不要连续执行多个目录探测命令。
+
+不要主动定位 Python 安装路径；只有在 `python ...` 命令失败并明确提示找不到 Python 时，才进行 Python 环境诊断。

@@ -838,3 +838,22 @@ v0.1 Step 1–9 实现完成后，用真实 `USER_SESSION` token 对 `use4.dm-us
 - 其余前提（专用账号、`from_env()` 实测、Login URL）保持未决。
 
 *相关提交：`c5ba5d7`（client 实测对齐）、`6759e1b`（IICS_API_NOTES.md）。*
+
+---
+
+## Post-ADR 补充（v0.1.1，只读稳定性补强）
+
+v0.1.1 是 **v0.1 只读边界内的稳定性补强，不是 v0.2**：不新增任何写操作 / 子命令，不改
+API 契约（V3 端点、`skip` 分页、小写 `and`、V2 by-name 均不变），仅提升长时间大 folder
+`export --details` 的网络容错。
+
+- **导出列精简**：`Task Summary` 增加 `source_objects` / `target_object` 两列；移除
+  `Field Mapping` / `Truncation Risk` 两个 sheet。
+- **`_request()` 容错**：新增默认 timeout `(10, 60)`（调用方显式传入则尊重）；对
+  `Timeout` / `ConnectionError` / HTTP `429/502/503/504` 最多 3 次尝试、backoff 1s→2s；
+  `400/403/404` 等业务错误不重试；`401` 仍走 `handle_401()`。重试日志仅 stderr，不含 token。
+- **`export --details` 单点容错**：单个 `get_task_detail` 失败不再中断整批，记入
+  `failed_details`（stdout JSON 与 JSON 文件均含），Excel 增加 `Export Errors` sheet；
+  `Task Summary` 保留失败 task 行；`rows` 恒等于 task 总数（便于与 `list-tasks count` 对比）。
+
+*相关提交：`3be0e63`（导出列精简）、本次（`fix: harden readonly export against transient failures`）。*

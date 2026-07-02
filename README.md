@@ -335,13 +335,20 @@ python iics_cli.py export JAPAN_COMMERCIAL_DWH --type DSS
 }
 ```
 
-Excel 自 v0.1.1 起只含 1 个 sheet `Task Summary`（原 `Field Mapping` / `Truncation Risk` 已移除，暂不导出）：
+Excel 自 v0.1.1 起含 2 个 sheet（原 `Field Mapping` / `Truncation Risk` 已移除）：
 
 | Sheet | 列 | 是否保证有数据 |
 |-------|------|--------------|
 | Task Summary | name / type / folder / runtime_agent / source_conn / target_conn / source_objects / target_object / status | 必有；`source_objects` / `target_object` 为 best-effort，缺失留空 |
+| Export Errors | task_name / task_type / folder / error_type / error | 无错误时写单行 `No export errors` |
 
 > 一个文件夹可能有上千个 task，`--details` 模式会对每个 task 单独调用一次详情接口，文件夹大时会比较慢，预期要等。如果只是想快速看一眼有哪些 task，先用 `--summary-only`。
+
+### v0.1.1 稳定性（长时间大 folder 导出更抗网络波动）
+
+- **`_request()` 带 timeout + 瞬时重试**：默认 timeout `(connect=10s, read=60s)`；对 `Timeout` / `ConnectionError` / HTTP `429/502/503/504` 最多重试 3 次（backoff 1s→2s），重试日志只进 stderr，不含 token。`400/403/404` 等业务错误不重试。
+- **`export --details` 单个 task 失败不中断**：失败 task 记入 `failed_details`（stdout JSON 与 JSON 导出均含），并在 Excel `Export Errors` sheet 列出；`Task Summary` 仍保留该 task 一行（name/type/folder/status，其余留空）。
+- **`rows` = 本次 task 总数**（不是成功详情数），便于与 `list-tasks` 的 `count` 对比：`list-tasks count == export rows` 说明没漏 task；`failed_details_count > 0` 说明有详情没拉到，可重跑或查 `Export Errors`。
 
 ---
 
@@ -391,7 +398,7 @@ python smoke_test.py
 - **同名 task 跨文件夹无法可靠区分**：务必带 `--folder`。
 - **MTT / WORKFLOW 的 runtime / connection 字段结构未深度验证**：v0.1 主要在 DSS 上做了完整字段验证。
 - **Token 不会自动刷新**：过期后需要重新从浏览器手动获取。
-- **Excel 自 v0.1.1 起只导出单个 `Task Summary` sheet**（原 `Field Mapping` / `Truncation Risk` 已移除）；其中 `source_objects` / `target_object` 为 best-effort，缺失留空、不报错。
+- **Excel 自 v0.1.1 起导出 `Task Summary` + `Export Errors` 两个 sheet**（原 `Field Mapping` / `Truncation Risk` 已移除）；`source_objects` / `target_object` 为 best-effort，缺失留空、不报错。
 
 ---
 

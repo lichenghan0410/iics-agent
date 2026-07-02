@@ -123,9 +123,11 @@ def _cmd_export(client, args) -> dict:
     if isinstance(list_result, dict) and "error" in list_result:
         return list_result
 
+    tasks = list_result.get("tasks", [])
     details = []
+    failed_details = []
     if not args.summary_only:
-        for task in list_result.get("tasks", []):
+        for task in tasks:
             name = task.get("name", "")
             ttype = task.get("type", "")
             _log(f"  fetching detail: {name} ({ttype})")
@@ -135,12 +137,34 @@ def _cmd_export(client, args) -> dict:
                 task_type=ttype,
                 folder_path=args.folder,
             )
-            details.append(detail)  # 错误对象也保留，不中断 export
+            if isinstance(detail, dict) and "error" in detail:
+                # 单个 task 详情失败：记录，不中断整批 export
+                failed_details.append(
+                    {
+                        "name": name,
+                        "type": ttype,
+                        "folder": args.folder,
+                        "error_type": detail.get("error_type", ""),
+                        "error": detail.get("error", ""),
+                    }
+                )
+                # 保留最小占位行，Task Summary 不丢该 task
+                details.append(
+                    {
+                        "name": name,
+                        "type": ttype,
+                        "folder": args.folder,
+                        "status": task.get("status", ""),
+                    }
+                )
+            else:
+                details.append(detail)
 
     data = {
         "folder": args.folder,
-        "tasks": list_result.get("tasks", []),
+        "tasks": tasks,
         "details": details,
+        "failed_details": failed_details,
     }
     return export_results(
         client, data=data, format=args.format, filename=args.filename

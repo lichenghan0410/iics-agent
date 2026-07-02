@@ -7,6 +7,7 @@ server_url / headers_v2 / headers_v3 / handle_401)。
 Step 3 implements URL factory (build_v2_url / build_v3_url)。
 Step 4 implements IICSClient._request()（GET-only，V2/V3 URL + Header 注入，
 401 调用 handle_401 并最多重试一次）。
+v0.1.1：_request 增加 timeout 与瞬时错误重试（Timeout/ConnectionError/429/502/503/504）。
 
 安全边界（v0.1）:
   - 只读模式，禁止任何写路径（POST/PUT/PATCH/DELETE 业务调用）
@@ -15,6 +16,8 @@ Step 4 implements IICSClient._request()（GET-only，V2/V3 URL + Header 注入�
 """
 
 import os
+import sys
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -29,6 +32,13 @@ LOGIN_URL = os.environ.get(
 )
 
 DEFAULT_SERVER_URL = "https://use4.dm-us.informaticacloud.com"
+
+# 网络容错（v0.1.1）：(connect, read) 秒
+DEFAULT_TIMEOUT = (10, 60)
+# 瞬时错误重试：最多 3 次总尝试（即 2 次重试）；backoff 1s / 2s
+TRANSIENT_MAX_ATTEMPTS = 3
+TRANSIENT_BACKOFF = (1, 2)
+TRANSIENT_STATUS = frozenset({429, 502, 503, 504})
 
 
 # ── URL 工厂（模块级函数）────────────────────────────────────────────────────
@@ -150,11 +160,15 @@ class IICSClient:
         use_v3: bool = False,
         **kwargs,
     ) -> requests.Response:
-        """发出 IICS GET 请求。
+        """发出 IICS GET 请求（v0.1.1：含 timeout + 瞬时错误重试）。
 
         - 按 use_v3 选择 URL 工厂与 Header（V3: INFA-SESSION-ID / V2: icSessionId）
         - 查询参数须经 kwargs 的 params 传入，禁止在 path 内拼 query string
-        - 401 时调用 session.handle_401()，最多重试一次；非 401 错误 raise_for_status()
+        - timeout：默认 DEFAULT_TIMEOUT=(10,60)，调用方显式传入则尊重
+        - 瞬时错误（Timeout / ConnectionError / HTTP 429/502/503/504）：最多 3 次总尝试，
+          backoff 1s/2s；日志仅到 stderr，不含 token/header
+        - 401 时调用 session.handle_401()（v0.1 直接抛 RuntimeError）
+        - 其它 4xx（400/403/404 等）不重试，直接 raise_for_status()
         - 成功返回 requests.Response，调用方负责 .json()
         """
         method = method.upper()
@@ -176,11 +190,44 @@ class IICSClient:
         if caller_headers:
             headers.update(caller_headers)
 
-        # 最多两次 attempt：attempt 0 → 401 → handle_401() → attempt 1
-        response = requests.request(method, url, headers=headers, **kwargs)
-        if response.status_code == 401:
-            self.session.handle_401()  # v0.1 直接抛 RuntimeError，不会到达下一行
-            response = requests.request(method, url, headers=headers, **kwargs)
+        # 尊重调用方 timeout，否则用默认
+        kwargs.setdefault("timeout", DEFAULT_TIMEOUT)
 
-        response.raise_for_status()
-        return response
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                response = requests.request(
+                    method, url, headers=headers, **kwargs
+                )
+            except (requests.exceptions.Timeout,
+                    requests.exceptions.ConnectionError) as e:
+                if attempt < TRANSIENT_MAX_ATTEMPTS:
+                    self._sleep_backoff(attempt, type(e).__name__)
+                    continue
+                raise
+
+            # 401：会话失效，交给 handle_401（v0.1 抛 RuntimeError，不重试）
+            if response.status_code == 401:
+                self.session.handle_401()
+
+            # 瞬时 HTTP 错误：重试
+            if (response.status_code in TRANSIENT_STATUS
+                    and attempt < TRANSIENT_MAX_ATTEMPTS):
+                self._sleep_backoff(attempt, f"HTTP {response.status_code}")
+                continue
+
+            response.raise_for_status()
+            return response
+
+    @staticmethod
+    def _sleep_backoff(attempt: int, reason: str) -> None:
+        """瞬时错误 backoff + stderr 日志（不含 token/cookie/header）。"""
+        idx = min(attempt - 1, len(TRANSIENT_BACKOFF) - 1)
+        delay = TRANSIENT_BACKOFF[idx]
+        print(
+            f"[IICS retry] attempt {attempt}/{TRANSIENT_MAX_ATTEMPTS} "
+            f"failed ({reason}); retrying in {delay}s",
+            file=sys.stderr,
+        )
+        time.sleep(delay)

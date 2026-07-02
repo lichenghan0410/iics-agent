@@ -1,12 +1,12 @@
 """
 tools/exporter.py — export_results（openpyxl，单 sheet）
 
-v0.1.1：Excel 仅导出 `Task Summary` 一个 sheet（原 Field Mapping / Truncation Risk
-已移除）。JSON 导出行为不变。
-
-Task Summary 列:
-  name, type, folder, runtime_agent, source_conn, target_conn,
-  source_objects, target_object, status
+v0.1.1：Excel 导出两个 sheet：
+  - Task Summary : name, type, folder, runtime_agent, source_conn, target_conn,
+                   source_objects, target_object, status
+  - Export Errors: task_name, task_type, folder, error_type, error
+                   （data["failed_details"]；无错误也建表并写 "No export errors"）
+原 Field Mapping / Truncation Risk 已移除。JSON 导出整份 data（含 failed_details）。
 """
 
 import json
@@ -26,6 +26,7 @@ _SUMMARY_HEADERS = [
     "target_object",
     "status",
 ]
+_EXPORT_ERROR_HEADERS = ["task_name", "task_type", "folder", "error_type", "error"]
 
 
 def _conn_display(conn) -> str:
@@ -193,6 +194,10 @@ def export_results(
         summary_rows = _build_summary_rows(data)
         rows = len(summary_rows)
 
+        failed = data.get("failed_details")
+        if not isinstance(failed, list):
+            failed = []
+
         if format == "json":
             out_path.write_text(
                 json.dumps(data, ensure_ascii=False, indent=2),
@@ -205,13 +210,34 @@ def export_results(
             ws_summary.append(_SUMMARY_HEADERS)
             for row in summary_rows:
                 ws_summary.append(row)
+
+            # Export Errors sheet（无错误也创建并写提示行）
+            ws_err = wb.create_sheet("Export Errors")
+            ws_err.append(_EXPORT_ERROR_HEADERS)
+            if failed:
+                for f in failed:
+                    ws_err.append(
+                        [
+                            f.get("name", ""),
+                            f.get("type", ""),
+                            f.get("folder", ""),
+                            f.get("error_type", ""),
+                            f.get("error", ""),
+                        ]
+                    )
+            else:
+                ws_err.append(["No export errors"])
+
             wb.save(out_path)
 
         return {
             "file_path": str(out_path),
             "format": format,
             "rows": rows,
-            "summary": f"已导出 {rows} 条记录至 {out_path}",
+            "failed_details_count": len(failed),
+            "failed_details": failed,
+            "summary": f"已导出 {rows} 条记录至 {out_path}"
+            + (f"（{len(failed)} 条详情失败）" if failed else ""),
         }
     except Exception as e:  # noqa: BLE001 — 工具层统一结构化错误
         return {"error": str(e), "error_type": type(e).__name__}

@@ -219,12 +219,22 @@ v0.1 **完成**当且仅当全部满足：
   ```
 
 - [ ] 三个文件夹各自 `list-tasks` 能返回非报错 JSON。
-- [ ] 至少一次 `export` 生成的 `.xlsx` 能用 Excel 打开；v0.1.1 起仅含单个
-      `Task Summary` sheet（列：name, type, folder, runtime_agent, source_conn,
-      target_conn, source_objects, target_object, status）。
+- [ ] 至少一次 `export` 生成的 `.xlsx` 能用 Excel 打开；v0.1.1 起含
+      `Task Summary`（列：name, type, folder, runtime_agent, source_conn,
+      target_conn, source_objects, target_object, status）与 `Export Errors` 两个 sheet。
 - [ ] 四个子命令成功时退出码 0，工具返回 `{"error":...}` 时退出码 1。
 - [ ] 全程无 token 出现在 stdout / 文件 / git。
 - [ ] 测试结束后 `git status --short` 不应出现源码改动；导出的 `.xlsx` 不应被 git 跟踪。
+
+### 6.1 v0.1.1 稳定性验收项
+
+- [ ] `export --details` 返回的 JSON 含 `rows` / `failed_details_count` / `failed_details`；
+      `rows` 等于同参数 `list-tasks` 的 `count`（task 总数，非成功详情数）。
+- [ ] 若本次有详情失败：`failed_details_count > 0`，Excel `Export Errors` sheet 逐条列出
+      失败 task；`Task Summary` 仍保留这些 task 的行（name/type/folder/status）。
+- [ ] 若无失败：`failed_details_count = 0`，`Export Errors` sheet 写单行 `No export errors`。
+- [ ] 网络波动时 stderr 出现 `[IICS retry] attempt N/3 ...` 日志，stdout 仍为纯净 JSON，
+      日志中不含 token / cookie / header。
 
 ---
 

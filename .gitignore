@@ -6,3 +6,6 @@ venv/
 *.xlsx
 *.jsonl
 .DS_Store
+
+# 开发者本地文档产物，不纳入 Git
+docs/

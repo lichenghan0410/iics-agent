@@ -439,9 +439,6 @@ python smoke_test.py
 
 ---
 
-## 参考文档
+## 参考
 
-- `ADR-001-IICS-Agent-v0.1-Readonly-MVP.md` —— 架构决策记录，含完整的 API 契约、URL 构建规则、Smoke Test 定义
-- `IICS_Agent_System_Design.md` —— 系统设计文档，含未来 v0.2+（写操作）的规划
-- `SMOKE_TEST_RUNBOOK.md` —— 验收级冒烟测试操作手册（开发/QA 向，比本手册更详细的测试步骤）
-- `IICS_API_NOTES.md` —— IICS API 实测笔记，记录每个 endpoint 的真实行为和踩坑细节
+本 README 已包含日常使用所需的全部步骤。开发者内部设计文档不作为普通运维使用前提。

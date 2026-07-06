@@ -1,6 +1,6 @@
 # IICS Agent
 
-Takeda Japan IICS 运维工具，查询三个 JAPAN_* 文件夹下的 task 配置并导出 Excel。
+Takeda Japan IICS 运维工具，查询或改修三个 JAPAN_* 文件夹下的 task 配置并导出 Excel。
 
 **当前阶段：v0.1 Read-only MVP（只读模式，写操作不可用）。**
 
@@ -10,8 +10,7 @@ Takeda Japan IICS 运维工具，查询三个 JAPAN_* 文件夹下的 task 配�
   下方 `iics_cli.py` 子命令。
 - **Mode C（辅）**：运维人员在终端**手动**执行同一组 `iics_cli.py` 命令（与 Mode A 生成的
   命令完全一致）。下方「可用命令」即手动调用速查。
-- **不存在 Mode B / Cowork Interactive Agent**：该模式已在 ADR Amendment 1 移除，项目不
-  实现 `iics_agent.py`，不依赖 Anthropic SDK。
+
 
 ## 环境准备
 

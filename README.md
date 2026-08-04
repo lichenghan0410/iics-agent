@@ -277,7 +277,13 @@ python iics_cli.py get-task DI_FACT_SALES_DAILY DSS --folder JAPAN_SCRM_DI
 
 > **重要な制約**：`runtime_agent` は DSS 種別では常に空文字列です。IICS API の DSS 詳細エンドポイント自体が runtime environment フィールドを返さないためで、プラットフォームのデータ可得性の制約であり、ツールのバグではありません。MTT / WORKFLOW の runtime フィールドは未検証で、次バージョンで補完します。
 >
-> **同名 task への対応**：v0.1 にはフォルダをまたいだ確実な区別機能がありません（IICS V3 照会は名前フィルタに非対応）。そのため `--folder` は任意引数ですが毎回指定することを強く推奨します。指定しないと、同名 task が別フォルダに存在する場合、意図しない方が返る可能性があります。
+> **MTT 照会は task name と `--folder` の両方が必須**：指定した folder 内でまず該当 task の federated ID を特定し、公式の FRS detail エンドポイントで詳細を取得します。これにより MTT のフォルダをまたいだ同名の曖昧さは解消されます。例：
+>
+> ```powershell
+> python .\iics_cli.py get-task TASK_NAME MTT --folder JAPAN_SCRM_BAU
+> ```
+>
+> MTT は `--id` の直接指定に対応しません。**DSS / WORKFLOW** の `--folder` は任意のままで、これらはフォルダをまたいだ同名で曖昧さが残る可能性があります（`--folder` の付与を推奨）。
 
 ### 3. `resolve-connection` — connection ID の解決
 

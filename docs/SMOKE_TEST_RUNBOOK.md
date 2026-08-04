@@ -33,7 +33,7 @@ v0.1 的自动化测试分两层，本手册覆盖**集成层（真实 API 冒�
 | Test 1 | `SessionManager` + URL factory | 纯函数 | server_url 正确、`/saas` 不重复 |
 | Test 2 | `list_tasks`（全部类型，含分页） | 集成-只读 | 返回 `tasks`，`count >= 0` |
 | Test 3 | `list_tasks`（按 type 过滤） | 集成-只读 | 返回 `tasks`，type 归一化生效 |
-| Test 4 | `get_task_detail`（V2 by-name 路由 + 抽取，v0.1 不做 V3 消歧） | 集成-只读 | 无 error、含 `runtime_agent` |
+| Test 4 | `get_task_detail`（DSS/WORKFLOW: V2 by-name；MTT: V3→federated→`mttask/frs`） | 集成-只读 | 无 error、含 `runtime_agent`；MTT 另断言 `detail_route`/`id_type` |
 | Test 5 | `resolve_connection` + 缓存命中 | 集成-只读 | 两次解析结果一致（第二次走缓存） |
 | Test 6 | `export_results`（openpyxl 单 sheet Task Summary） | 集成-本地 IO | 生成 `.xlsx` 且文件存在 |
 
@@ -253,6 +253,30 @@ python iics_cli.py export     JAPAN_SCRM_DI --type DSS   # 比对 rows 与 faile
 - [ ] 若无失败：`failed_details_count = 0`，`Export Errors` sheet 写单行 `No export errors`。
 - [ ] 网络波动时 stderr 出现 `[IICS retry] attempt N/3 ...` 日志，stdout 仍为纯净 JSON，
       日志中不含 token / cookie / header。
+
+### 6.2 MTT 专项验收（Amendment 2：FRS 详情路径）
+
+用真实 MTT task 跑一次冒烟（Test 4 非 SKIP）：
+
+```powershell
+$env:IICS_TEST_TASK_TYPE = "MTT"
+$env:IICS_TEST_TASK_NAME = "<真实 MTT 名称>"
+$env:IICS_TEST_FOLDER    = "<真实 folder，如 JAPAN_SCRM_BAU>"
+python .\smoke_test.py
+```
+
+正例验收：
+
+- [ ] `detail_route == "v2-mttask-frs"` 且 `id_type == "federated"`。
+- [ ] 无 404 / 500；connection 解析正常；Test 4 实跑非 SKIP。
+- [ ] 详情经 `mttask/frs/{federated_id}` 获取（非 `mttask/name/`、非裸 `mttask/{id}`）。
+
+负例（预期结构化错误，均**不发** HTTP）：
+
+- [ ] MTT 无 folder（`get-task NAME MTT`，缺 `--folder`）→ `MissingFolderError`。
+- [ ] MTT 传 classic ID（内部 `task_id_type="classic"`）→ `InvalidIdTypeError`。
+- [ ] `task_id` 与 `task_name`/`folder` 同时提供 → `ConflictingArgumentsError`。
+- [ ] DSS / WORKFLOW 传 `task_id` → `UnsupportedArgumentError`。
 
 ---
 

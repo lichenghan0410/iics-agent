@@ -136,9 +136,36 @@ id, path, type, description, updatedBy, updateTime, tags, sourceControl, customA
 |------|------|
 | `/saas/api/v2/connection` | ✅ 200（连接列表） |
 | `/saas/api/v2/connection/<id>` | ✅ 200（用于 `resolve_connection`） |
-| `/saas/api/v2/dsstask/name/<name>` | ✅ 200（DSS 详情，~3s） |
+| `/saas/api/v2/dsstask/name/<name>` | ✅ 200（DSS 详情，~3s；DSS 默认路径） |
 
 `build_v2_url()` 逻辑（`/saas` 前缀、不重复）与 ADR D-3 一致，**实测无需修改**。
+
+### 7.0 MTT ID 体系与 FRS 详情端点（Amendment 2 依据）
+
+V3 objects 枚举返回的 id 是 **federated / FRS ID**；V2 另有 **classic ID**，二者是不同体系：
+
+| ID 类型 | 示例 |
+|--------|------|
+| federated / FRS | `fABfm4RCYqVfuVEi9e8BGb` |
+| classic V2 | `000LVU0I0000000004TZ` |
+
+| 端点 | federated ID | classic ID | 说明 |
+|------|:---:|:---:|------|
+| `GET /saas/api/v2/mttask/frs/{ID}` | ✅ 成功 | ❌ 失败 | **官方文档明确支持 federated ID**；项目 MTT 默认路径 |
+| `GET /saas/api/v2/mttask/{ID}`（裸） | ✅ 实测成功 | ✅ 实测成功 | 属**实测兼容行为**，官方未明确保证；**不作为项目默认契约** |
+
+**ID 类型约束**：`/mttask/frs/{id}` **严格要求 federated ID**，classic ID **不得**传入该端点。
+代码依赖显式 `task_id_type="federated"` 契约，不做 `startswith("000")` 之类字符串启发式判断。
+
+**MTT 是类型特例，不得推广到 DSS / WORKFLOW**——实测：
+
+```
+DSS:      V3 federated ID → GET /saas/api/v2/dsstask/{id}   → 500
+WORKFLOW: V3 federated ID → GET /saas/api/v2/workflow/{id}  → 500
+```
+
+因此 DSS / WORKFLOW 继续走 V2 by-name（`dsstask/name/<name>` / `workflow/name/<name>`），
+federated → V2 by-id 仅对 MTT（且必须经 `mttask/frs/`）成立。
 
 ### 7.1 DSS（dsstask）详情字段（实测）
 
@@ -177,5 +204,6 @@ v0.2 需补充确认（可能在 `runtimeEnvironmentId` 或 mapping 参数中）
 
 - MTT / WORKFLOW 详情的 runtime 与 connection 字段结构（v0.1 仅深度验证 DSS）。
 - V3 `q` 是否支持 `tag` / `updateTime` 过滤（KB 提及，未验证）。
-- 跨文件夹同名 task 的可靠区分标识（V3 `id` 或 V2 by-id 路由）。
+- 跨文件夹同名 task：**MTT 已解决**（V3 federated id → `mttask/frs/{id}`，见 §7.0）；
+  **DSS / WORKFLOW 仍未解决**（federated → V2 by-id 返回 500，继续 by-name）。
 - 写操作（update/batch）的 PARTIAL UPDATE 行为——v0.1 严格只读，未触碰。

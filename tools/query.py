@@ -3,9 +3,9 @@ tools/query.py — 只读查询工具：list_tasks / get_task_detail / resolve_c
 
 v0.1 Read-only MVP。
 Step 5 implements normalize_task_type / list_tasks（V3 枚举 + 自动分页）。
-Step 6 implements get_task_detail + extract_runtime_agent / extract_connection_ids
-（V2 by-name detail 路由 + best-effort 抽取；实测 V3 q 不支持 name/path，故 v0.1
-不做按名消歧）。
+Step 6 implements get_task_detail + extract_runtime_agent / extract_connection_ids。
+MTT 详情走官方 FRS 路径 mttask/frs/{federated_id}（V3 folder 枚举取 federated id →
+跨 folder 同名消歧）；DSS / WORKFLOW 保持 V2 by-name 现状，不支持 task_id/task_id_type。
 Step 7 implements resolve_connection（V2 connection/<id> + ConnectionCache），并把
 get_task_detail(resolve_connections=True) 接入真实 connection name 解析。
 
@@ -136,12 +136,14 @@ _RUNTIME_AGENT_FIELDS = (
     "runtime_agent",
 )
 
-# V2 detail 路由
+# V2 detail 路由（DSS / WORKFLOW：保持 by-name 现状；MTT 走 FRS，见 _V2_MTT_FRS）
 _V2_DETAIL_PATH = {
     "DSS": "dsstask/name/",
-    "MTT": "mttask/name/",
     "WORKFLOW": "workflow/name/",
 }
+
+# MTT 详情官方文档明确支持的路径：只接受 federated / FRS ID
+_V2_MTT_FRS = "mttask/frs/"
 
 _DETAIL_TASK_TYPES = {"DSS", "MTT", "WORKFLOW"}
 
@@ -234,72 +236,161 @@ def extract_connection_ids(raw: dict, task_type: str) -> dict:
     return result
 
 
+def _apply_extraction(client, detail, raw, task_type, resolve_connections):
+    """在 detail 上补充 runtime / connection 抽取与解析（保留既有逻辑）。"""
+    detail["runtime_agent"] = extract_runtime_agent(raw)
+    conn = extract_connection_ids(raw, task_type)
+    detail["source_connection"] = {"id": conn["source_connection_id"], "name": ""}
+    detail["target_connection"] = {"id": conn["target_connection_id"], "name": ""}
+    detail["connection_ids"] = conn["connection_ids"]
+    detail["unresolved_connection_fields"] = conn["unresolved_connection_fields"]
+    detail["raw"] = raw
+
+    if resolve_connections and detail["connection_ids"]:
+        res = resolve_connection(client, detail["connection_ids"])
+        resolved_map = res.get("resolved", {})
+        detail["resolved_connections"] = resolved_map
+        if res.get("failed"):
+            detail["connection_resolve_failed"] = res["failed"]
+        for key in ("source_connection", "target_connection"):
+            cid = detail[key]["id"]
+            if cid in resolved_map:
+                detail[key]["name"] = resolved_map[cid]
+    return detail
+
+
+def _get_mtt_detail(client, task_name, folder_path, task_id, task_id_type,
+                    resolve_connections):
+    """MTT 详情：官方 FRS 端点 mttask/frs/{federated_id}（只接受 federated ID）。
+
+    方式 A：name + folder → V3 folder 枚举取 federated id → FRS。
+    方式 B：内部直接传 federated id（task_id + task_id_type="federated"）。
+    """
+    # ── 方式 B：直接 federated id ─────────────────────────────────────────
+    if task_id:
+        if task_id_type == "federated":
+            federated_id = task_id
+            try:
+                resp = client._request(
+                    "GET", _V2_MTT_FRS + federated_id, use_v3=False
+                )
+                raw = resp.json()
+            except Exception as e:  # noqa: BLE001
+                return {"error": str(e), "error_type": type(e).__name__}
+            detail = {
+                "name": "", "type": "MTT", "folder": "",
+                "id": federated_id, "id_type": "federated",
+                "detail_route": "v2-mttask-frs",
+            }
+            return _apply_extraction(client, detail, raw, "MTT", resolve_connections)
+        # 非 federated：classic / 空 / 其它 → 一律 InvalidIdTypeError，不发 HTTP
+        if task_id_type == "classic":
+            msg = "MTT FRS detail lookup requires a federated ID"
+        elif not task_id_type:
+            msg = "task_id_type='federated' is required for MTT task_id lookup"
+        else:
+            msg = "MTT FRS detail lookup requires a federated ID"
+        return {"error": msg, "error_type": "InvalidIdTypeError"}
+
+    # ── 方式 A：name + folder ────────────────────────────────────────────
+    if not task_name:
+        return {"error": "task_name or task_id is required",
+                "error_type": "ValueError"}
+    if not folder_path:
+        return {"error": "folder_path is required for MTT detail lookup",
+                "error_type": "MissingFolderError"}
+
+    listed = list_tasks(client, folder_path=folder_path, task_type="MTT")
+    if isinstance(listed, dict) and "error" in listed:
+        return listed
+    matches = [
+        t for t in listed.get("tasks", [])
+        if t.get("name") == task_name and t.get("type") == "MTT"
+    ]
+    if not matches:
+        return {"error": "MTT task not found in folder",
+                "error_type": "TaskNotFoundError"}
+    if len(matches) > 1:
+        candidates = [
+            {
+                "id": m.get("id", ""),
+                "path": m.get("path", ""),
+                "type": m.get("type", ""),
+                "name": m.get("name", ""),
+            }
+            for m in matches
+        ]
+        return {
+            "error": "Multiple MTT tasks matched in the same folder",
+            "error_type": "AmbiguousTaskError",
+            "candidates": candidates,
+        }
+
+    federated_id = matches[0].get("id", "")
+    try:
+        resp = client._request("GET", _V2_MTT_FRS + federated_id, use_v3=False)
+        raw = resp.json()
+    except Exception as e:  # noqa: BLE001
+        return {"error": str(e), "error_type": type(e).__name__}
+    detail = {
+        "name": task_name, "type": "MTT", "folder": folder_path,
+        "id": federated_id, "id_type": "federated",
+        "detail_route": "v2-mttask-frs",
+    }
+    return _apply_extraction(client, detail, raw, "MTT", resolve_connections)
+
+
 def get_task_detail(
     client,
-    task_name: str,
-    task_type: str,
+    task_name: str = "",
+    task_type: str = "",
     folder_path: str = "",
+    task_id: str = "",
+    task_id_type: str = "",
     resolve_connections: bool = True,
 ) -> dict:
-    """获取单个 task 详情（V3 同名消歧 + V2 detail 路由 + best-effort 抽取）。
+    """获取单个 task 详情。
 
-    注意：Step 6 不调用尚未实现的 resolve_connection()，connection name 留空，
-    Step 7 再接入真实解析。
+    - MTT：官方 FRS 路径 mttask/frs/{federated_id}（跨 folder 同名消歧，见 _get_mtt_detail）。
+      task_id/task_id_type 仅 MTT 支持；用户 CLI 不直接传 MTT id。
+    - DSS / WORKFLOW：保持现有 V2 by-name 行为，不支持 task_id/task_id_type。
     """
-    if not task_name:
-        return {"error": "task_name is required", "error_type": "ValueError"}
     if task_type not in _DETAIL_TASK_TYPES:
         return {
             "error": f"invalid task_type: {task_type}",
             "error_type": "ValueError",
         }
 
-    try:
-        # v0.1：实测 V3 q 仅支持 location/type，name==/path== 均返回 400，
-        # 无法低成本按名消歧；故直接走 V2 by-name 查询，folder_path 仅记录到输出。
-        # 跨文件夹同名消歧待后续有可查询标识时再实现。
+    # 参数冲突：task_id 不得与 task_name / folder_path 并存（不发 HTTP、不枚举）
+    if task_id and (task_name or folder_path):
+        return {
+            "error": "task_id cannot be combined with task_name or folder_path",
+            "error_type": "ConflictingArgumentsError",
+        }
 
-        # ── V2 task detail 路由 ──────────────────────────────────────────
+    # DSS / WORKFLOW 不支持新参数
+    if task_type in ("DSS", "WORKFLOW") and (task_id or task_id_type):
+        return {
+            "error": "task_id and task_id_type are only supported for MTT "
+                     "federated lookup",
+            "error_type": "UnsupportedArgumentError",
+        }
+
+    if task_type == "MTT":
+        return _get_mtt_detail(
+            client, task_name, folder_path, task_id, task_id_type,
+            resolve_connections,
+        )
+
+    # ── DSS / WORKFLOW：现状 by-name（行为不变）─────────────────────────────
+    if not task_name:
+        return {"error": "task_name is required", "error_type": "ValueError"}
+    try:
         path = _V2_DETAIL_PATH[task_type] + task_name
         resp = client._request("GET", path, use_v3=False)
         raw = resp.json()
-
-        runtime_agent = extract_runtime_agent(raw)
-        conn = extract_connection_ids(raw, task_type)
-
-        detail = {
-            "name": task_name,
-            "type": task_type,
-            "folder": folder_path,
-            "runtime_agent": runtime_agent,
-            "source_connection": {
-                "id": conn["source_connection_id"],
-                "name": "",
-            },
-            "target_connection": {
-                "id": conn["target_connection_id"],
-                "name": "",
-            },
-            "connection_ids": conn["connection_ids"],
-            "unresolved_connection_fields": conn["unresolved_connection_fields"],
-            "raw": raw,
-        }
-
-        # ── Step 7：接入真实 connection name 解析 ─────────────────────────
-        if resolve_connections and detail["connection_ids"]:
-            res = resolve_connection(client, detail["connection_ids"])
-            resolved_map = res.get("resolved", {})
-            detail["resolved_connections"] = resolved_map
-            if res.get("failed"):
-                detail["connection_resolve_failed"] = res["failed"]
-            src_id = detail["source_connection"]["id"]
-            tgt_id = detail["target_connection"]["id"]
-            if src_id in resolved_map:
-                detail["source_connection"]["name"] = resolved_map[src_id]
-            if tgt_id in resolved_map:
-                detail["target_connection"]["name"] = resolved_map[tgt_id]
-
-        return detail
+        detail = {"name": task_name, "type": task_type, "folder": folder_path}
+        return _apply_extraction(client, detail, raw, task_type, resolve_connections)
     except Exception as e:  # noqa: BLE001 — 工具层统一结构化错误
         return {"error": str(e), "error_type": type(e).__name__}
 

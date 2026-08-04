@@ -68,9 +68,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # get-task
     p_get = sub.add_parser("get-task", help="获取单个 task 详情")
-    p_get.add_argument("name")
+    p_get.add_argument("name", help="task 名称")
     p_get.add_argument("type", choices=["DSS", "MTT", "WORKFLOW"])
-    p_get.add_argument("--folder", default="")
+    p_get.add_argument(
+        "--folder", default="",
+        help="MTT 必需（用于 V3 定位 federated id）；DSS/WORKFLOW 可选",
+    )
     p_get.add_argument("--no-resolve", action="store_true")
 
     # resolve-connection
@@ -130,13 +133,30 @@ def _cmd_export(client, args) -> dict:
         for task in tasks:
             name = task.get("name", "")
             ttype = task.get("type", "")
+            tid = task.get("id", "")
             _log(f"  fetching detail: {name} ({ttype})")
-            detail = get_task_detail(
-                client,
-                task_name=name,
-                task_type=ttype,
-                folder_path=args.folder,
-            )
+            if ttype == "MTT":
+                # MTT：复用 list_tasks 已返回的 federated id 走 FRS，
+                # 不传 name/folder（避免 ConflictingArgumentsError），后续回填
+                detail = get_task_detail(
+                    client,
+                    task_type="MTT",
+                    task_id=tid,
+                    task_id_type="federated",
+                )
+                if isinstance(detail, dict) and "error" not in detail:
+                    if not detail.get("name"):
+                        detail["name"] = name
+                    if not detail.get("folder"):
+                        detail["folder"] = args.folder
+            else:
+                # DSS / WORKFLOW：保持现状 by-name
+                detail = get_task_detail(
+                    client,
+                    task_name=name,
+                    task_type=ttype,
+                    folder_path=args.folder,
+                )
             if isinstance(detail, dict) and "error" in detail:
                 # 单个 task 详情失败：记录，不中断整批 export
                 failed_details.append(

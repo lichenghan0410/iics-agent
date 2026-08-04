@@ -40,6 +40,22 @@ python iics_cli.py export <folder> [--type ALL] [--format excel|json] [--filenam
 
 ## 所有命令输出均为 JSON，可直接解析；日志和警告输出至 stderr
 
+## MTT 详情强制规则（Amendment 2）
+
+- MTT 的 name 查询**必须带 `--folder`**。
+- 必须通过 **V3 folder 枚举取得 federated ID**，再调用 **`mttask/frs/{federated_id}`**。
+- **不得**调用裸 `mttask/{id}`。
+- **不得**回退 `mttask/name/{name}`。
+- **不得**接受用户直接传入 MTT `--id`。
+- 内部 task_id 调用**必须显式标记** `task_id_type="federated"`。
+- `task_id` 与 `task_name`/`folder` **不得同时提供**。
+
+## DSS / WORKFLOW 规则
+
+- **不得**使用 `task_id` / `task_id_type` 新参数。
+- **不得**用 V3 federated ID 调 V2 by-id（实测返回 500，是 MTT 类型特例）。
+- 保持现状 V2 by-name；跨 folder 同名仍是已知限制。
+
 ## 安全边界
 
 - v0.1 只读模式，以下操作不可用且不得实现：update、batch、write 相关子命令

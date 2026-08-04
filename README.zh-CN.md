@@ -277,7 +277,13 @@ python iics_cli.py get-task DI_FACT_SALES_DAILY DSS --folder JAPAN_SCRM_DI
 
 > **重要限制**：`runtime_agent` 对 DSS 类型恒为空字符串——IICS API 的 DSS 详情接口本身不返回 runtime environment 字段，这是平台数据可得性限制，不是工具的 bug。MTT / WORKFLOW 的 runtime 字段尚未深度验证，下个版本会补。
 >
-> **同名 task 怎么办**：v0.1 没有跨文件夹的可靠消歧能力（IICS V3 查询不支持按名称过滤），所以 `--folder` 虽然是可选参数，但强烈建议每次都带上，否则如果有同名 task 分布在不同文件夹，结果可能不是你想要的那个。
+> **MTT 查询必须同时提供 task name 和 `--folder`**：系统会先在指定 folder 中定位该 task 的 federated ID，再通过官方 FRS detail 接口获取详情。这样彻底避免了 MTT 的跨文件夹同名歧义。示例：
+>
+> ```powershell
+> python .\iics_cli.py get-task TASK_NAME MTT --folder JAPAN_SCRM_BAU
+> ```
+>
+> MTT 不支持直接使用 `--id`。**DSS / WORKFLOW** 的 `--folder` 仍为可选，且它们跨文件夹同名时仍可能有歧义（建议也带上 `--folder`）。
 
 ### 3. `resolve-connection` — 解析 connection ID
 

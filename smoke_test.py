@@ -74,16 +74,21 @@ def main() -> int:
     else:
         task_name = TEST_TASK or result_typed["tasks"][0]["name"]
 
+        # MTT 与 DSS/WORKFLOW 一律传 name + folder；MTT 内部走 V3→federated→FRS
         detail = get_task_detail(
             client, task_name=task_name, task_type=TEST_TYPE, folder_path=TEST_FOLDER,
         )
         assert "error" not in detail, f"get_task_detail error: {detail}"
         assert "runtime_agent" in detail
-        if TEST_TYPE == "DSS":
+        if TEST_TYPE == "MTT":
+            assert detail["detail_route"] == "v2-mttask-frs", detail
+            assert detail["id_type"] == "federated", detail
+            assert "raw" in detail
+        elif TEST_TYPE == "DSS":
             assert "source_connection" in detail
         else:
             assert "raw" in detail
-        print(f"✅ Test 4 passed: get_task_detail({task_name})")
+        print(f"✅ Test 4 passed: get_task_detail({task_name}) type={TEST_TYPE}")
 
         conn_id = (detail.get("source_connection") or {}).get("id")
         if TEST_TYPE == "DSS" and conn_id:

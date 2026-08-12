@@ -393,20 +393,26 @@ def get_task_detail(
     resolve_connections: bool = True,
 ) -> dict:
     """
-    返回格式（MTT 成功含 id / id_type / detail_route）:
+    返回格式（Amendment 3 修正；MTT 归一化 detail）:
     {
-        "name": "...",
-        "type": "MTT",
-        "folder": "...",
-        "id": "fABfm4RCYqVfuVEi9e8BGb",   # MTT: federated id
-        "id_type": "federated",           # MTT only
-        "detail_route": "v2-mttask-frs",  # MTT only
-        "runtime_agent": "...",
-        "source_connection": {"id": "000LVU...", "name": "..."},
-        "target_connection": {"id": "000LVU...", "name": "..."},
+        "@type": "mtTask",
+        "id": "000LVU0Z000000006IMR",     # MTT: classic V2 id（来自 FRS payload）
+        "orgId": "000LVU",
+        "federated_id": "fABfm4RCYqVfuVEi9e8BGb",  # V3/FRS id（用于 FRS 请求）
+        "detail_route": "v2-mttask-frs",
+        "task_name": "...", "task_type": "MTT", "task_location": "...",
+        "task_updated_on": "...",
+        "runtime_environment": {"id": "<rtId>", "name": "<resolved>"},
+        "task_mapping": {"id": "...", "name": "...", "location": null, "updated_on": "..."},
+        "transformations": [ ... ],       # 仅来自 MTT parameters[]
+        "parameter_file": {"directory": null, "name": null},
+        "advanced_options": {"pre_processing_commands": null, "post_processing_commands": null},
+        "enrichment_warnings": [],
         "raw": { <完整 API 响应> }
     }
-    实现要点（Amendment 2）:
+    # DSS / WORKFLOW 仍为旧结构（name/type/folder/runtime_environment/source_connection/…/raw）
+    # 注：已删除误导性的 id_type；顶层 id 即 classic id，federated_id 单独字段。
+    实现要点（Amendment 2 / 3）:
     - **MTT**：官方 FRS 路径 `mttask/frs/{federated_id}`（只接受 federated id）。
         方式 A：name + folder → list_tasks(folder, MTT) 精确匹配取 federated id → FRS。
         方式 B：task_id + task_id_type="federated"（跳过枚举，供 export 复用）。
@@ -486,18 +492,21 @@ def export_results(
     filename: str = "",        # 空则按时间戳生成
 ) -> dict:
     """
-    返回格式:
+    返回格式（Amendment 3：task_count 与 rows 分离）:
     {
         "file_path": "/path/to/output.xlsx",
         "format": "excel",
-        "rows": 83,
-        "summary": "已导出 83 条记录至 .../output.xlsx"
+        "task_count": 10,     # == list_tasks.count（逻辑 task 数）
+        "rows": 24,           # Task Summary 实际物理数据行数（MTT 展开后可 > task_count）
+        "failed_details_count": 0, "failed_details": [],
+        "enrichment_warnings_count": 0, "enrichment_warnings": [],
+        "summary": "..."
     }
-    Excel 输出（v0.1.1 起仅 1 个 sheet）:
-    - Task Summary : name, type, folder, runtime_agent, source_conn, target_conn,
-                     source_objects, target_object, status
-                     source_objects / target_object 为 best-effort 抽取，缺失留空。
-    注：原 Field Mapping / Truncation Risk 两个 sheet 自 v0.1.1 起移除，暂不导出。
+    Excel 输出：业务数据主 sheet `Task Summary`（Amendment 3 起 23 列，含 MTT 增强列）+
+    错误/警告 sheet `Export Errors`。MTT 每个 Source/Target transformation = 1 行；
+    DSS/WORKFLOW 仍 1 task = 1 行。原 Field Mapping / Truncation Risk 已移除。
+    完整成功条件：task_count == list_tasks.count 且 failed_details_count == 0
+    （不再用 rows == task_count 判断）。
     """
 ```
 
@@ -707,10 +716,11 @@ else:
         client, task_name=task_name, task_type=TEST_TYPE, folder_path=TEST_FOLDER,
     )
     assert "error" not in detail, f"get_task_detail error: {detail}"
-    assert "runtime_agent" in detail
+    assert "runtime_environment" in detail
     if TEST_TYPE == "MTT":
         assert detail["detail_route"] == "v2-mttask-frs"
-        assert detail["id_type"] == "federated"
+        assert detail["federated_id"] and "id_type" not in detail
+        assert detail["task_mapping"]["location"] is None
     # connection 断言按 task_type 区分（DSS 有稳定 source/target；MTT/WORKFLOW v0.1 返回 raw）
     if TEST_TYPE == "DSS":
         assert "source_connection" in detail
@@ -841,7 +851,7 @@ v0.1 Step 1–9 实现完成后，用真实 `USER_SESSION` token 对 `use4.dm-us
 
 ### 新增数据可得性限制（非缺陷）
 
-- **DSS 详情不返回 runtime environment / agent**（仅空的 `srcRuntimeAttrs`/`tgtRuntimeAttrs`），故 `get_task_detail` 的 `runtime_agent` 对 DSS 恒为空字符串（best-effort，不报错）。
+- **DSS 详情不返回 runtime environment / agent**（仅空的 `srcRuntimeAttrs`/`tgtRuntimeAttrs`），故 `get_task_detail` 的 `runtime_environment.name`（Amendment 3 前称 `runtime_agent`）对 DSS 恒为空（best-effort，不报错）。
 - MTT / WORKFLOW 的 runtime / connection 字段结构尚未深度实测，列入 v0.2 待确认。
 
 ### 健壮性补强
@@ -899,8 +909,9 @@ API 契约（V3 端点、`skip` 分页、小写 `and`、V2 by-name 均不变）�
   **不做** `task_id.startswith("000")` 之类字符串启发式判断，严格依赖显式契约。
 - **task_id 与 task_name/folder 不得同时出现**（→ `ConflictingArgumentsError`，不枚举、不发 HTTP）。
 - **DSS / WORKFLOW 不支持** `task_id` / `task_id_type`（传入 → `UnsupportedArgumentError`）；行为保持不变。
-- MTT 成功返回新增顶层 `id`（federated）/ `id_type: "federated"` / `detail_route: "v2-mttask-frs"`；
-  保留 runtime / connection / sourceObjects / targetObject / raw 抽取。
+- MTT 成功返回顶层 `id`（federated）/ `detail_route: "v2-mttask-frs"`。
+  **（注：此描述已被 Amendment 3 修正——顶层 `id` 实为 classic V2 ID，federated 拆为独立
+  `federated_id` 字段，`id_type` 已删除；详见 Amendment 3。）**
 - **export**：MTT 复用 list_tasks 已返回的 federated id，按 `task_id + task_id_type="federated"` 调 FRS，
   每 MTT 一次 `mttask/frs/{id}`、不重复枚举、不传 name/folder（返回后回填）；单条失败不中断整批。
 
@@ -916,4 +927,67 @@ API 契约（V3 端点、`skip` 分页、小写 `and`、V2 by-name 均不变）�
   证明 federated→V2 by-id 是 **MTT 类型特例**，不得推广。详见 `docs/IICS_API_NOTES.md`。
 - 本仓库对 MTT FRS 路由有 fake 测试（Test A–K）覆盖；真实字段级验证建议按 Runbook MTT 专项跑一次。
 
-*相关提交：本次（`fix: resolve MTT details through FRS endpoint`）。*
+*相关提交：`1de1f94`（`fix: resolve MTT details through FRS endpoint`）。*
+
+---
+
+## Amendment 3 — MTT Metadata Enrichment & Export Row Model
+
+**性质**：v0.1 只读边界内的信息增强，**不是 v0.2**，不新增写操作 / 顶级子命令 / 依赖。仅
+增强 MTT 查询与导出；DSS / WORKFLOW 详情查询路径完全不变。
+
+### 变更点
+
+1. **MTT 查询字段增强**：归一化 detail 增补 task_name/task_type/task_location/task_updated_on、
+   runtime_environment、task_mapping、transformations、parameter_file、advanced_options、
+   enrichment_warnings。
+2. **Mapping by-ID enrichment**：`MTT.mappingId → GET mapping/{id}` 取 name / updated_on；
+   Mapping Location 当前不可得（见 §13）。
+3. **Runtime Environment by-ID enrichment**：`MTT.runtimeEnvironmentId → GET runtimeEnvironment/{id}`
+   取 name。**不使用 agentId** 冒充 Runtime Environment。
+4. **`runtime_agent` → `runtime_environment`**：公开 schema/export/测试/文档统一更名；结构为
+   `{"id": <rtId or null>, "name": <resolved or null>}`。内部抽取函数改名 `extract_runtime_env_name`。
+5. **classic `id` 与 `federated_id` 分离**：MTT FRS payload 顶层 `id` 是 **classic V2 ID**；
+   V3/FRS 请求用的 id 记为 `federated_id`。**删除误导性的 `id_type`**。
+6. **transformation 只来自 MTT `parameters[]`**：不使用 Mapping parameters；不取
+   `parameters[0]`/`[-1]`/first_source/last_target；不按 Connection ID 去重。
+7. **MTT parameters 内联展开到 Task Summary**：每个有效 Source/Target parameter = 1 Excel 行，
+   任务级字段每行重复，**不 merge cells**。
+8. **不新增 MTT 专属 sheet**：Excel 只有 `Task Summary`（业务数据主 sheet）+ `Export Errors`
+   （错误/警告 sheet）。
+9. **`task_count` 与 `rows` 分离**：task_count == list_tasks.count；rows == 物理数据行数
+   （MTT 展开后可 > task_count）。完整成功 = task_count 一致 **且** failed_details_count == 0。
+   **不再用 `rows == task_count` / `rows == list_tasks.count` 判断完整性**。
+10. **Mapping / Runtime / Connection process-local cache**：一次 export 内同一 id 只真实请求一次
+    （复用 ConnectionCache，新增 ObjectCache 供 mapping/runtime）；不做磁盘持久化。
+11. **main-detail failure 与 enrichment warning 分级**：`mttask/frs/{id}` 失败 → failed_details
+    （进 Export Errors、failed_details_count +1）；`connection/mapping/runtimeEnvironment` 失败
+    → enrichment warning（字段留空、记 warning、**不**增加 failed_details_count、不终止批量）。
+12. **Mapping Location 当前不可得**：`task_mapping.location = null`，Excel 空白；**禁止**等于
+    Task Location。未来或经 `mapping.assetFrsGuid ↔ V3 MAPPING id` 验证，本次不实现、不猜测。
+13. **multi-object parser 已做数组安全处理**：`extendedObject.objects[]` 保序去重、支持多值
+    （Excel 同格换行 + wrap text）；但真实样本均为 `singleMode=true`、长度 1，**多对象场景尚未
+    真实验证**。
+
+### 对正文旧契约的反向修正
+
+已在正文同步修正：`get_task_detail` 契约（id/federated_id/去除 id_type、runtime_environment、
+transformations 等）、`export_results` 契约（task_count/rows 分离、双 sheet）、Smoke Test 4、
+D-4/export 流程、Amendment 2 中 `id（federated）/id_type` 的描述均标注被本 Amendment 修正。
+
+### Task Summary 列（23 列，DSS/WORKFLOW 共用，MTT 专属列留空）
+
+`@type, id, orgId, Task Name, Task Type, Task Location, Runtime Environment, Task Updated On,
+Mapping Name, Mapping Location, Mapping Updated On, Transformation Name, Source Connection,
+Source Object, Custom Query, Target Connection, Operation, Target Object,
+Parameter File Directory, Parameter File Name, Pre-Processing Commands, Post-Processing Commands, Status`
+
+### 已验证 / 待确认
+
+- MTT `id`/`federated_id` 分离、runtime/mapping enrichment、parameters 展开、缓存、失败分级：
+  本仓库 fake 测试 A–N 覆盖。
+- 真实字段级验证（`runtime_environment.id == raw.runtimeEnvironmentId`、Mapping Name 非空等）
+  建议按 Runbook §6.3 用真实 MTT task 跑一次。
+- 多对象 `extendedObject.objects[]`（length > 1）：防御性实现，**尚无真实样本验证**。
+
+*相关提交：本次（`feat: enrich MTT metadata and export rows`）。*

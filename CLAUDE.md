@@ -50,6 +50,20 @@ python iics_cli.py export <folder> [--type ALL] [--format excel|json] [--filenam
 - 内部 task_id 调用**必须显式标记** `task_id_type="federated"`。
 - `task_id` 与 `task_name`/`folder` **不得同时提供**。
 
+## MTT 信息增强 / 导出（Amendment 3）
+
+- MTT 归一化 detail：顶层 `id`=classic V2 ID、`federated_id`=V3/FRS ID（**无 `id_type`**）。
+- runtime 字段统一为 `runtime_environment {id,name}`（旧名 `runtime_agent` 已弃用）；
+  MTT 用 `runtimeEnvironmentId → runtimeEnvironment/{id}`，**不得**用 `agentId`。
+- mapping 用 `mappingId → mapping/{id}`（name/updated_on）；`Mapping Location` 恒 null，
+  **不得**等于 Task Location。
+- transformation **只来自 MTT `parameters[]`**（顺序保留、不去重、不取首尾），不得用 mapping parameters。
+- Excel：`Task Summary`（23 列）+ `Export Errors` 两个 sheet；**不得新增 MTT 专属 sheet**；
+  MTT 每个 transformation 一行。
+- 计数：`task_count`（==list_tasks.count）与 `rows`（物理行数）**分离**；完整成功=task_count 一致
+  且 failed_details_count==0；**不得**用 `rows==task_count` 判断。
+- enrichment（mapping/runtime/connection）失败 → `enrichment_warnings`，**不**计入 `failed_details`、不终止导出。
+
 ## DSS / WORKFLOW 规则
 
 - **不得**使用 `task_id` / `task_id_type` 新参数。

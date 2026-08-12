@@ -79,11 +79,13 @@ def main() -> int:
             client, task_name=task_name, task_type=TEST_TYPE, folder_path=TEST_FOLDER,
         )
         assert "error" not in detail, f"get_task_detail error: {detail}"
-        assert "runtime_agent" in detail
+        assert "runtime_environment" in detail
         if TEST_TYPE == "MTT":
             assert detail["detail_route"] == "v2-mttask-frs", detail
-            assert detail["id_type"] == "federated", detail
-            assert "raw" in detail
+            assert detail["federated_id"], detail
+            assert "id_type" not in detail, detail
+            assert detail["task_mapping"]["location"] is None, detail
+            assert "transformations" in detail and "raw" in detail
         elif TEST_TYPE == "DSS":
             assert "source_connection" in detail
         else:

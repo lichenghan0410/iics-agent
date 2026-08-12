@@ -3,7 +3,7 @@ tools/query.py — 只读查询工具：list_tasks / get_task_detail / resolve_c
 
 v0.1 Read-only MVP。
 Step 5 implements normalize_task_type / list_tasks（V3 枚举 + 自动分页）。
-Step 6 implements get_task_detail + extract_runtime_agent / extract_connection_ids。
+Step 6 implements get_task_detail + extract_runtime_env_name / extract_connection_ids。
 MTT 详情走官方 FRS 路径 mttask/frs/{federated_id}（V3 folder 枚举取 federated id →
 跨 folder 同名消歧）；DSS / WORKFLOW 保持 V2 by-name 现状，不支持 task_id/task_id_type。
 Step 7 implements resolve_connection（V2 connection/<id> + ConnectionCache），并把
@@ -128,12 +128,11 @@ def list_tasks(
 
 
 # ── best-effort 抽取辅助 ─────────────────────────────────────────────────────
-_RUNTIME_AGENT_FIELDS = (
+# DSS/WORKFLOW 无可靠 runtime id，best-effort 从 raw 取一个 runtime 名字候选字段。
+_RUNTIME_ENV_NAME_FIELDS = (
     "runtimeEnvironmentName",
     "runtimeEnvironment",
     "runtimeEnvName",
-    "agentName",
-    "runtime_agent",
 )
 
 # V2 detail 路由（DSS / WORKFLOW：保持 by-name 现状；MTT 走 FRS，见 _V2_MTT_FRS）
@@ -148,11 +147,11 @@ _V2_MTT_FRS = "mttask/frs/"
 _DETAIL_TASK_TYPES = {"DSS", "MTT", "WORKFLOW"}
 
 
-def extract_runtime_agent(raw: dict) -> str:
-    """best-effort 抽取 runtime agent 名称，未找到返回 ""，不抛异常。"""
+def extract_runtime_env_name(raw: dict) -> str:
+    """best-effort 抽取 runtime environment 名称，未找到返回 ""，不抛异常。"""
     if not isinstance(raw, dict):
         return ""
-    for field in _RUNTIME_AGENT_FIELDS:
+    for field in _RUNTIME_ENV_NAME_FIELDS:
         if field not in raw:
             continue
         value = raw[field]
@@ -237,8 +236,13 @@ def extract_connection_ids(raw: dict, task_type: str) -> dict:
 
 
 def _apply_extraction(client, detail, raw, task_type, resolve_connections):
-    """在 detail 上补充 runtime / connection 抽取与解析（保留既有逻辑）。"""
-    detail["runtime_agent"] = extract_runtime_agent(raw)
+    """DSS / WORKFLOW：runtime_environment + connection 抽取与解析。
+
+    v0.1.x：公开字段 runtime_environment（{id,name}）。DSS/WORKFLOW 无可靠 runtime id，
+    故 id=None、name 为既有 best-effort 解析值（或 None）；不新增 API 调用。
+    """
+    rt_name = extract_runtime_env_name(raw)
+    detail["runtime_environment"] = {"id": None, "name": rt_name or None}
     conn = extract_connection_ids(raw, task_type)
     detail["source_connection"] = {"id": conn["source_connection_id"], "name": ""}
     detail["target_connection"] = {"id": conn["target_connection_id"], "name": ""}
@@ -259,6 +263,196 @@ def _apply_extraction(client, detail, raw, task_type, resolve_connections):
     return detail
 
 
+# ── MTT enrichment 辅助 ──────────────────────────────────────────────────────
+def _transformation_name(param: dict) -> str:
+    """transformation 名：优先 label，其次 name（去首尾 $）。"""
+    label = param.get("label")
+    if isinstance(label, str) and label:
+        return label
+    name = param.get("name", "")
+    return name.strip("$") if isinstance(name, str) else ""
+
+
+def _extract_source_object(param: dict):
+    """返回 (source_object, custom_query)。
+
+    customQuery 非空 → custom_query=该值、source_object=""（隐藏 dummy sourceObject）。
+    否则优先级：extendedObject.object.name → extendedObject.objects[].name（保序去重，
+    多值返回 list）→ sourceObject → objectName。
+    """
+    cq = param.get("customQuery")
+    if isinstance(cq, str) and cq.strip():
+        return "", cq
+
+    eo = param.get("extendedObject")
+    if isinstance(eo, dict):
+        obj = eo.get("object")
+        if isinstance(obj, dict) and obj.get("name"):
+            return obj["name"], None
+        objs = eo.get("objects")
+        if isinstance(objs, list) and objs:
+            names = []
+            for o in objs:
+                if isinstance(o, dict):
+                    nm = o.get("name")
+                    if nm and nm not in names:
+                        names.append(nm)
+            if names:
+                return (names if len(names) > 1 else names[0]), None
+
+    for f in ("sourceObject", "objectName"):
+        v = param.get(f)
+        if isinstance(v, str) and v:
+            return v, None
+    return "", None
+
+
+def _extract_target_object(param: dict) -> str:
+    """target object：targetObjectLabel → targetObject → objectLabel → objectName。"""
+    for f in ("targetObjectLabel", "targetObject", "objectLabel", "objectName"):
+        v = param.get(f)
+        if isinstance(v, str) and v:
+            return v
+    return ""
+
+
+def _extract_mtt_transformations(raw: dict) -> list:
+    """从 MTT raw.parameters[] 严格按顺序展开 Source/Target transformation。
+
+    以存在 sourceConnectionId / targetConnectionId 为可展开依据；不去重、不取首尾。
+    connection name 由调用方后续解析回填。
+    """
+    out = []
+    params = raw.get("parameters") if isinstance(raw, dict) else None
+    if not isinstance(params, list):
+        return out
+    for p in params:
+        if not isinstance(p, dict):
+            continue
+        if p.get("sourceConnectionId"):
+            src_obj, cq = _extract_source_object(p)
+            out.append({
+                "name": _transformation_name(p),
+                "kind": "source",
+                "source_connection": {"id": p["sourceConnectionId"], "name": ""},
+                "source_object": src_obj,
+                "custom_query": cq,
+                "target_connection": None,
+                "target_object": None,
+                "operation": None,
+            })
+        elif p.get("targetConnectionId"):
+            out.append({
+                "name": _transformation_name(p),
+                "kind": "target",
+                "source_connection": None,
+                "source_object": None,
+                "custom_query": None,
+                "target_connection": {"id": p["targetConnectionId"], "name": ""},
+                "target_object": _extract_target_object(p),
+                "operation": p.get("operationType"),
+            })
+    return out
+
+
+def _resolve_runtime_env(client, rt_id, warnings):
+    """runtimeEnvironmentId → runtimeEnvironment/{id} → name（带缓存）。失败记 warning。"""
+    if not rt_id:
+        return {"id": None, "name": None}
+
+    def fetch(k):
+        resp = client._request("GET", f"runtimeEnvironment/{k}", use_v3=False)
+        d = resp.json()
+        return d.get("name")
+
+    try:
+        name = client.runtime_cache.get_or_fetch(rt_id, fetch)
+    except Exception as e:  # noqa: BLE001 — enrichment 失败降级为 warning
+        warnings.append({"kind": "runtime_environment", "id": rt_id,
+                         "error": str(e), "error_type": type(e).__name__})
+        name = None
+    return {"id": rt_id, "name": name}
+
+
+def _resolve_mapping(client, mapping_id, warnings):
+    """mappingId → mapping/{id} → {id,name,location(None),updated_on}（带缓存）。失败记 warning。
+
+    Mapping API 无可靠 location/folder，故 location 恒 None，不等于 Task Location。
+    """
+    if not mapping_id:
+        return {"id": None, "name": None, "location": None, "updated_on": None}
+
+    def fetch(k):
+        resp = client._request("GET", f"mapping/{k}", use_v3=False)
+        d = resp.json()
+        return {"name": d.get("name"), "updated_on": d.get("updateTime")}
+
+    try:
+        m = client.mapping_cache.get_or_fetch(mapping_id, fetch)
+    except Exception as e:  # noqa: BLE001
+        warnings.append({"kind": "mapping", "id": mapping_id,
+                         "error": str(e), "error_type": type(e).__name__})
+        return {"id": mapping_id, "name": None, "location": None, "updated_on": None}
+    return {"id": mapping_id, "name": m.get("name"), "location": None,
+            "updated_on": m.get("updated_on")}
+
+
+def _build_mtt_detail(client, raw, federated_id, task_name, folder_path,
+                      resolve_connections):
+    """把 MTT FRS raw 规范化为增强 detail（不直接 merge raw，显式映射字段）。"""
+    warnings = []
+
+    rt = _resolve_runtime_env(client, raw.get("runtimeEnvironmentId"), warnings)
+    mapping = _resolve_mapping(client, raw.get("mappingId"), warnings)
+    transformations = _extract_mtt_transformations(raw)
+
+    # 解析每个 transformation 的 source/target connection 名（带缓存 + warning 分级）
+    if resolve_connections and transformations:
+        conn_ids = []
+        for t in transformations:
+            for key in ("source_connection", "target_connection"):
+                c = t.get(key)
+                if c and c.get("id") and c["id"] not in conn_ids:
+                    conn_ids.append(c["id"])
+        if conn_ids:
+            res = resolve_connection(client, conn_ids)
+            resolved = res.get("resolved", {})
+            for t in transformations:
+                for key in ("source_connection", "target_connection"):
+                    c = t.get(key)
+                    if c and c.get("id") in resolved:
+                        c["name"] = resolved[c["id"]]
+            for fid in res.get("failed", []):
+                warnings.append({"kind": "connection", "id": fid,
+                                 "error": "connection resolve failed",
+                                 "error_type": "EnrichmentError"})
+
+    return {
+        "@type": raw.get("@type", ""),
+        "id": raw.get("id", ""),               # classic V2 id（来自 FRS payload）
+        "orgId": raw.get("orgId", ""),
+        "federated_id": federated_id,          # V3/FRS id（用于 FRS 请求）
+        "detail_route": "v2-mttask-frs",
+        "task_name": task_name or raw.get("name", ""),
+        "task_type": "MTT",
+        "task_location": folder_path,
+        "task_updated_on": raw.get("updateTime", ""),
+        "runtime_environment": rt,
+        "task_mapping": mapping,
+        "transformations": transformations,
+        "parameter_file": {
+            "directory": raw.get("parameterFileDir"),
+            "name": raw.get("parameterFileName"),
+        },
+        "advanced_options": {
+            "pre_processing_commands": raw.get("preProcessingCmd"),
+            "post_processing_commands": raw.get("postProcessingCmd"),
+        },
+        "enrichment_warnings": warnings,
+        "raw": raw,
+    }
+
+
 def _get_mtt_detail(client, task_name, folder_path, task_id, task_id_type,
                     resolve_connections):
     """MTT 详情：官方 FRS 端点 mttask/frs/{federated_id}（只接受 federated ID）。
@@ -277,12 +471,9 @@ def _get_mtt_detail(client, task_name, folder_path, task_id, task_id_type,
                 raw = resp.json()
             except Exception as e:  # noqa: BLE001
                 return {"error": str(e), "error_type": type(e).__name__}
-            detail = {
-                "name": "", "type": "MTT", "folder": "",
-                "id": federated_id, "id_type": "federated",
-                "detail_route": "v2-mttask-frs",
-            }
-            return _apply_extraction(client, detail, raw, "MTT", resolve_connections)
+            return _build_mtt_detail(
+                client, raw, federated_id, "", "", resolve_connections
+            )
         # 非 federated：classic / 空 / 其它 → 一律 InvalidIdTypeError，不发 HTTP
         if task_id_type == "classic":
             msg = "MTT FRS detail lookup requires a federated ID"
@@ -332,12 +523,9 @@ def _get_mtt_detail(client, task_name, folder_path, task_id, task_id_type,
         raw = resp.json()
     except Exception as e:  # noqa: BLE001
         return {"error": str(e), "error_type": type(e).__name__}
-    detail = {
-        "name": task_name, "type": "MTT", "folder": folder_path,
-        "id": federated_id, "id_type": "federated",
-        "detail_route": "v2-mttask-frs",
-    }
-    return _apply_extraction(client, detail, raw, "MTT", resolve_connections)
+    return _build_mtt_detail(
+        client, raw, federated_id, task_name, folder_path, resolve_connections
+    )
 
 
 def get_task_detail(

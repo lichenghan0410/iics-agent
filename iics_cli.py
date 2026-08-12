@@ -145,10 +145,11 @@ def _cmd_export(client, args) -> dict:
                     task_id_type="federated",
                 )
                 if isinstance(detail, dict) and "error" not in detail:
-                    if not detail.get("name"):
-                        detail["name"] = name
-                    if not detail.get("folder"):
-                        detail["folder"] = args.folder
+                    # MTT 归一化 detail 用 task_name/task_location；method B 返回时为空，回填
+                    if not detail.get("task_name"):
+                        detail["task_name"] = name
+                    if not detail.get("task_location"):
+                        detail["task_location"] = args.folder
             else:
                 # DSS / WORKFLOW：保持现状 by-name
                 detail = get_task_detail(

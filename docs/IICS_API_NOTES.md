@@ -181,9 +181,40 @@ sourceConnectionId, targetConnectionId   # ✅ 可稳定抽取
 **⚠️ 数据限制**：DSS 详情**不返回 runtime environment / agent**字段。runtime 相关仅有
 `srcRuntimeAttrs` / `tgtRuntimeAttrs`，实测为空 `{"attrs": {}}`。
 
-**结论**：`get_task_detail()` 的 `runtime_agent` 对 DSS **恒为空字符串**（best-effort，
-不报错）。这是 API 数据可得性限制，非缺陷。MTT / WORKFLOW 的 runtime 字段尚未实测，
-v0.2 需补充确认（可能在 `runtimeEnvironmentId` 或 mapping 参数中）。
+**结论**：`get_task_detail()` 的 `runtime_environment.name`（Amendment 3 前称 `runtime_agent`）
+对 DSS **恒为空**（best-effort，不报错）。这是 API 数据可得性限制，非缺陷。
+
+### 7.2 MTT enrichment 端点（Amendment 3）
+
+**Mapping**：`GET /saas/api/v2/mapping/{mappingId}`
+
+- 可获取：`id`、`name`、`updateTime`。
+- **不包含可靠的** `path` / `location` / `folder` / `folderId`。
+- 因此 **Mapping Location = unavailable**（归一化为 `null`，**不得**等于 Task Location）。
+- 未来或验证 `mapping.assetFrsGuid ↔ V3 MAPPING object id`，本次不实现、不猜测。
+
+**Runtime Environment**：`GET /saas/api/v2/runtimeEnvironment/{runtimeEnvironmentId}`
+
+- 用于 `runtimeEnvironmentId → Runtime Environment Name`。
+- 明确：`runtimeEnvironmentId != agentId`；**不得**用 `agentId` 冒充 Runtime Environment。
+
+### 7.3 parameters 顺序（transformation 权威来源）
+
+实测：MTT 与 Mapping 的 `parameters[]` 顺序**可以不同**，例：
+
+```
+MTT     parameters 示例顺序：Source → Target
+Mapping parameters 示例顺序：Target → Source
+```
+
+因此 **Transformation（顺序 / 运行时覆盖值 / Source-Target 信息）只能来自
+`mttask/frs/{federated_id}.parameters[]`**，不得用 `mapping.parameters[]` 生成。
+
+### 7.4 Multi-object（防御性，未真实验证）
+
+`extendedObject.objects[]` 代码按数组安全解析（保序去重、支持多值、Excel 同格换行）。
+但**当前真实样本均为** `singleMode = true`、`extendedObject.objects.length = 1`；
+多对象场景属防御性实现，**尚未真实验证**。
 
 ---
 

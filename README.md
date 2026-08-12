@@ -268,14 +268,16 @@ python iics_cli.py get-task DI_FACT_SALES_DAILY DSS --folder JAPAN_SCRM_DI
   "name": "DI_FACT_SALES_DAILY",
   "type": "DSS",
   "folder": "JAPAN_SCRM_DI",
-  "runtime_agent": "",
+  "runtime_environment": {"id": null, "name": ""},
   "source_connection": {"id": "000LVU0B000000000015", "name": "SCRM_ORA_STDB"},
   "target_connection": {"id": "000LVU0B00000000009O", "name": "mysql_scrm_hnn_api"},
   "raw": { ... }
 }
 ```
 
-> **重要な制約**：`runtime_agent` は DSS 種別では常に空文字列です。IICS API の DSS 詳細エンドポイント自体が runtime environment フィールドを返さないためで、プラットフォームのデータ可得性の制約であり、ツールのバグではありません。MTT / WORKFLOW の runtime フィールドは未検証で、次バージョンで補完します。
+> **重要な制約**：`runtime_environment.name` は DSS 種別では常に空です。IICS API の DSS 詳細エンドポイント自体が runtime environment フィールドを返さないためで、プラットフォームのデータ可得性の制約であり、ツールのバグではありません。
+>
+> **MTT 詳細は増強済み**：MTT は公式 FRS 経路を使い、DSS/WORKFLOW と異なる構造を返します——トップレベルに `id`（classic V2 ID）、`federated_id`（V3/FRS ID）、`detail_route`、`runtime_environment{id,name}`、`task_mapping{id,name,location,updated_on}`（`location` は現状空）、`transformations[]`（MTT parameters のみ由来）、`enrichment_warnings[]`。
 >
 > **MTT 照会は task name と `--folder` の両方が必須**：指定した folder 内でまず該当 task の federated ID を特定し、公式の FRS detail エンドポイントで詳細を取得します。これにより MTT のフォルダをまたいだ同名の曖昧さは解消されます。例：
 >
@@ -338,36 +340,38 @@ python iics_cli.py export JAPAN_COMMERCIAL_DWH --type DSS
 {
   "file_path": "/path/to/iics_export_20260630_103000.xlsx",
   "format": "excel",
-  "rows": 83,
-  "summary": "83 件を .../iics_export_20260630_103000.xlsx に出力しました"
+  "task_count": 83,
+  "rows": 96,
+  "failed_details_count": 0, "failed_details": [],
+  "enrichment_warnings_count": 0, "enrichment_warnings": [],
+  "summary": "..."
 }
 ```
 
-Excel は v0.1.1 以降、2 つの sheet を含みます（旧 `Field Mapping` / `Truncation Risk` は削除）：
+Excel は 2 つの sheet を含みます（旧 `Field Mapping` / `Truncation Risk` は削除）：
 
-| Sheet | 列 | データ保証 |
-|-------|------|--------------|
-| Task Summary | name / type / folder / runtime_agent / source_conn / target_conn / source_objects / target_object / status | 必ず出力。`source_objects` / `target_object` は best-effort で、取得不可時は空 |
-| Export Errors | task_name / task_type / folder / error_type / error | エラーがない場合は 1 行 `No export errors` を記載 |
+| Sheet | 説明 |
+|-------|------|
+| Task Summary | 業務データ主 sheet、23 列（`@type, id, orgId, Task Name, Task Type, Task Location, Runtime Environment, Task Updated On, Mapping Name, Mapping Location, Mapping Updated On, Transformation Name, Source Connection, Source Object, Custom Query, Target Connection, Operation, Target Object, Parameter File Directory, Parameter File Name, Pre-Processing Commands, Post-Processing Commands, Status`）。**DSS / WORKFLOW：1 task = 1 行；MTT：各 Source/Target transformation = 1 行**（タスク級フィールドは各行に繰り返し）。MTT 専用列は DSS/WORKFLOW では空。複数 source object は同一セル内で改行表示。 |
+| Export Errors | エラー / 警告記録：主詳細の失敗は `error`、enrichment（mapping/runtime/connection）失敗は `warning`。どちらも無ければ 1 行 `No export errors`。 |
 
-> フォルダには数千の task が存在し得ます。`--details` モードは task ごとに詳細エンドポイントを 1 回ずつ呼ぶため、大きなフォルダでは時間がかかります。どの task があるかだけを素早く見たい場合は、まず `--summary-only` を使ってください。
+> フォルダには数千の task が存在し得ます。`--details` は task ごとに詳細を 1 回ずつ呼ぶため大きなフォルダでは時間がかかります。素早く一覧だけ見たい場合は `--summary-only`。
 
-### v0.1.1 安定性（長時間・大フォルダ出力のネットワーク変動耐性）
+### 安定性と出力判定
 
-- **`_request()` に timeout + 一時エラーの再試行**：既定 timeout `(connect=10s, read=60s)`。`Timeout` / `ConnectionError` / HTTP `429/502/503/504` に対して最大 3 回まで再試行（backoff 1s→2s）。再試行ログは stderr のみで、token は含みません。`400/403/404` 等の業務エラーは再試行しません。
-- **`export --details` は単一 task 失敗で中断しない**：失敗した task は `failed_details` に記録され（stdout の JSON と JSON 出力の両方に含む）、Excel の `Export Errors` sheet に列挙されます。`Task Summary` にも当該 task の行（name/type/folder/status、他は空）を残します。
-- **`rows` = 今回の task 総数**（成功詳細数ではありません）。`list-tasks` の `count` と比較できます：`list-tasks count == export rows` なら task の取りこぼしなし。`failed_details_count > 0` は取得できなかった詳細があることを示し、再実行または `Export Errors` の確認が必要です。
+- **`_request()` に timeout + 一時エラー再試行**：既定 timeout `(connect=10s, read=60s)`。`Timeout` / `ConnectionError` / HTTP `429/502/503/504` を最大 3 回再試行（backoff 1s→2s）。ログは stderr のみ・token を含まない。
+- **`export --details` は単一 task 失敗で中断しない**：主詳細の失敗は `failed_details`（`Export Errors` に記載）、`Task Summary` に当該 task 行は残す。MTT の mapping/runtime/connection **enrichment 失敗**は `enrichment_warnings` にのみ記録（該当欄は空）、`failed_details` には**計上せず**中断もしない。
 
-#### 出力判定基準（v0.1.1 以降）
+#### 出力判定基準
 
-| 判定 | 意味 |
+| カウント | 意味 |
 |------|------|
-| `rows` | 今回出力した task 総数。同一引数の `list-tasks` の `count` と一致すべき |
-| `rows == list-tasks count` | `Task Summary` が task を**取りこぼしていない**ことのみを示す。**全 task の詳細成功を意味しない** |
-| **完全成功** | `rows == list-tasks count` **かつ** `failed_details_count == 0` の両方を満たすこと |
-| `failed_details_count > 0` | Excel は生成済みだが**一部 task の詳細取得に失敗**。`Export Errors` sheet で失敗 task（および `error_type`/`error`）を確認し、必要に応じて**当該種別の出力を再実行** |
+| `task_count` | 今回の論理 task 数。同一引数の `list-tasks` の `count` と一致すべき |
+| `rows` | Task Summary の実際の物理データ行数（MTT 展開後は `task_count` を**上回り得る**） |
+| **完全成功** | `task_count == list-tasks count` **かつ** `failed_details_count == 0` |
+| `enrichment_warnings_count > 0` | 一部 mapping/runtime/connection 未解決（該当欄空）；完全性判定には影響せず、`Export Errors` で確認可 |
 
-> 推奨の突合手順：先に `list-tasks --type X` で `count` を控え、次に `export --type X` を実行し、stdout の `rows` と `count` が一致するか、`failed_details_count` が 0 かを確認します。両方を満たして初めて当該種別の出力が完全成功です。
+> 突合：`list-tasks --type X` で `count` を控え、`export --type X` の stdout で `task_count == count` かつ `failed_details_count == 0` を確認。**`rows == count` で完全性を判定しない**（MTT は複数行に展開）。
 
 ---
 
@@ -413,11 +417,11 @@ python smoke_test.py
 ## 既知の制約（v0.1 の境界）
 
 - **読み取り専用**：書き込み操作のサブコマンドは一切なく、コード上も `update`/`batch`/`safety` 関連ファイルは存在しません（権限による遮断ではありません）。
-- **DSS の `runtime_agent` は常に空**：API のデータ制約。上記 `get-task` の説明を参照。
+- **DSS の `runtime_environment.name` は常に空**：API のデータ制約。上記 `get-task` の説明を参照。
 - **同名 task をフォルダ間で確実に区別できない**：必ず `--folder` を付けてください。
 - **MTT / WORKFLOW の runtime / connection フィールド構造は未検証**：v0.1 は主に DSS で完全なフィールド検証を実施。
 - **Token は自動更新されない**：失効後はブラウザから手動で再取得が必要。
-- **Excel は v0.1.1 以降 `Task Summary` + `Export Errors` の 2 sheet を出力**（旧 `Field Mapping` / `Truncation Risk` は削除）。`source_objects` / `target_object` は best-effort で、取得不可時は空・エラーなし。
+- **Excel は `Task Summary`（23 列）+ `Export Errors` の 2 sheet を出力**（旧 `Field Mapping` / `Truncation Risk` は削除）。MTT は transformation 単位で複数行に展開され、`task_count` と `rows` は分離。
 
 ---
 

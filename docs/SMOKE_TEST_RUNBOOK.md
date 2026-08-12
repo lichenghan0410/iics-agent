@@ -267,7 +267,8 @@ python .\smoke_test.py
 
 正例验收：
 
-- [ ] `detail_route == "v2-mttask-frs"` 且 `id_type == "federated"`。
+- [ ] `detail_route == "v2-mttask-frs"`；`federated_id` 非空；**`id_type` 已移除**（不存在）。
+- [ ] 顶层 `id` 为 classic V2 ID（与 `federated_id` 不同体系）。
 - [ ] 无 404 / 500；connection 解析正常；Test 4 实跑非 SKIP。
 - [ ] 详情经 `mttask/frs/{federated_id}` 获取（非 `mttask/name/`、非裸 `mttask/{id}`）。
 
@@ -277,6 +278,38 @@ python .\smoke_test.py
 - [ ] MTT 传 classic ID（内部 `task_id_type="classic"`）→ `InvalidIdTypeError`。
 - [ ] `task_id` 与 `task_name`/`folder` 同时提供 → `ConflictingArgumentsError`。
 - [ ] DSS / WORKFLOW 传 `task_id` → `UnsupportedArgumentError`。
+
+### 6.3 MTT 信息增强与导出行模型（Amendment 3）
+
+Schema：
+
+- [ ] 归一化 detail 含 `runtime_environment`（**不再有 `runtime_agent`**）。
+- [ ] `runtime_environment.id == raw.runtimeEnvironmentId`；Runtime Environment Name 非空。
+- [ ] `task_mapping.id == raw.mappingId`；Mapping Name 非空、Mapping Updated On 可解析；
+      **Mapping Location 为空**（null）。
+
+Transformation（只来自 MTT `parameters[]`）：
+
+- [ ] `3 Source + 1 Target → 4 transformations / 4 Excel 行`；`1 Source + 1 Target → 2 / 2`。
+- [ ] `customQuery` 非空 → Source Object 为空、Custom Query 保留。
+- [ ] transformation name 按 `label → name`（去首尾 `$`）优先级。
+- [ ] source/target connection name 可解析；optional key 缺失不报错（空白单元格）。
+- [ ] 多 source object 单元格开启 wrap text。
+
+计数：
+
+- [ ] `task_count == list-tasks count`；`rows == Task Summary 物理数据行数`（MTT 展开后可 > task_count）。
+- [ ] **不**断言 `rows == task_count`。
+
+失败分级：
+
+- [ ] mapping/runtime/connection enrichment 失败 → `enrichment_warnings_count` 增加、
+      `failed_details_count` **不**增加、task 行保留。
+- [ ] 主详情（`mttask/frs`）失败 → `failed_details_count +1`、进 `Export Errors`、批量继续。
+
+缓存：
+
+- [ ] 一次 export 内同一 `connectionId` / `mappingId` / `runtimeEnvironmentId` 只请求一次。
 
 ---
 

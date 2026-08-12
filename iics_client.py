@@ -23,7 +23,7 @@ from typing import Optional
 
 import requests
 
-from cache.connection_cache import ConnectionCache
+from cache.connection_cache import ConnectionCache, ObjectCache
 
 # ── 模块级常量 ──────────────────────────────────────────────────────────────
 LOGIN_URL = os.environ.get(
@@ -152,6 +152,9 @@ class IICSClient:
     def __init__(self, session: SessionManager):
         self.session = session
         self.connection_cache = ConnectionCache()
+        # v0.1.x：MTT enrichment 的 process-local 缓存（同一 id 只 fetch 一次）
+        self.mapping_cache = ObjectCache()
+        self.runtime_cache = ObjectCache()
 
     def _request(
         self,

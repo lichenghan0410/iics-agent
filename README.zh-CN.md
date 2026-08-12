@@ -268,14 +268,16 @@ python iics_cli.py get-task DI_FACT_SALES_DAILY DSS --folder JAPAN_SCRM_DI
   "name": "DI_FACT_SALES_DAILY",
   "type": "DSS",
   "folder": "JAPAN_SCRM_DI",
-  "runtime_agent": "",
+  "runtime_environment": {"id": null, "name": ""},
   "source_connection": {"id": "000LVU0B000000000015", "name": "SCRM_ORA_STDB"},
   "target_connection": {"id": "000LVU0B00000000009O", "name": "mysql_scrm_hnn_api"},
   "raw": { ... }
 }
 ```
 
-> **重要限制**：`runtime_agent` 对 DSS 类型恒为空字符串——IICS API 的 DSS 详情接口本身不返回 runtime environment 字段，这是平台数据可得性限制，不是工具的 bug。MTT / WORKFLOW 的 runtime 字段尚未深度验证，下个版本会补。
+> **重要限制**：`runtime_environment.name` 对 DSS 类型恒为空——IICS API 的 DSS 详情接口本身不返回 runtime environment 字段，这是平台数据可得性限制，不是工具的 bug。
+>
+> **MTT 详情已增强**：MTT 走官方 FRS 路径，返回结构与 DSS/WORKFLOW 不同——顶层含 `id`（classic V2 ID）、`federated_id`（V3/FRS ID）、`detail_route`、`runtime_environment{id,name}`、`task_mapping{id,name,location,updated_on}`（`location` 当前为空）、`transformations[]`（仅来自 MTT parameters）、`enrichment_warnings[]`。
 >
 > **MTT 查询必须同时提供 task name 和 `--folder`**：系统会先在指定 folder 中定位该 task 的 federated ID，再通过官方 FRS detail 接口获取详情。这样彻底避免了 MTT 的跨文件夹同名歧义。示例：
 >
@@ -338,36 +340,38 @@ python iics_cli.py export JAPAN_COMMERCIAL_DWH --type DSS
 {
   "file_path": "/path/to/iics_export_20260630_103000.xlsx",
   "format": "excel",
-  "rows": 83,
-  "summary": "已导出 83 条记录至 .../iics_export_20260630_103000.xlsx"
+  "task_count": 83,
+  "rows": 96,
+  "failed_details_count": 0, "failed_details": [],
+  "enrichment_warnings_count": 0, "enrichment_warnings": [],
+  "summary": "..."
 }
 ```
 
-Excel 自 v0.1.1 起含 2 个 sheet（原 `Field Mapping` / `Truncation Risk` 已移除）：
+Excel 含 2 个 sheet（原 `Field Mapping` / `Truncation Risk` 已移除）：
 
-| Sheet | 列 | 是否保证有数据 |
-|-------|------|--------------|
-| Task Summary | name / type / folder / runtime_agent / source_conn / target_conn / source_objects / target_object / status | 必有；`source_objects` / `target_object` 为 best-effort，缺失留空 |
-| Export Errors | task_name / task_type / folder / error_type / error | 无错误时写单行 `No export errors` |
+| Sheet | 说明 |
+|-------|------|
+| Task Summary | 业务数据主 sheet，共 23 列（`@type, id, orgId, Task Name, Task Type, Task Location, Runtime Environment, Task Updated On, Mapping Name, Mapping Location, Mapping Updated On, Transformation Name, Source Connection, Source Object, Custom Query, Target Connection, Operation, Target Object, Parameter File Directory, Parameter File Name, Pre-Processing Commands, Post-Processing Commands, Status`）。**DSS / WORKFLOW：1 task = 1 行；MTT：每个 Source/Target transformation = 1 行**（任务级字段每行重复），MTT 专属列对 DSS/WORKFLOW 留空。多个 source object 在同一单元格换行显示。 |
+| Export Errors | 错误 / 警告记录：主详情失败记为 `error`，enrichment（mapping/runtime/connection）失败记为 `warning`；都没有时写单行 `No export errors`。 |
 
-> 一个文件夹可能有上千个 task，`--details` 模式会对每个 task 单独调用一次详情接口，文件夹大时会比较慢，预期要等。如果只是想快速看一眼有哪些 task，先用 `--summary-only`。
+> 一个文件夹可能有上千个 task，`--details` 模式会对每个 task 单独调用一次详情接口，文件夹大时会比较慢。快速预览用 `--summary-only`。
 
-### v0.1.1 稳定性（长时间大 folder 导出更抗网络波动）
+### 稳定性与导出判定
 
-- **`_request()` 带 timeout + 瞬时重试**：默认 timeout `(connect=10s, read=60s)`；对 `Timeout` / `ConnectionError` / HTTP `429/502/503/504` 最多重试 3 次（backoff 1s→2s），重试日志只进 stderr，不含 token。`400/403/404` 等业务错误不重试。
-- **`export --details` 单个 task 失败不中断**：失败 task 记入 `failed_details`（stdout JSON 与 JSON 导出均含），并在 Excel `Export Errors` sheet 列出；`Task Summary` 仍保留该 task 一行（name/type/folder/status，其余留空）。
-- **`rows` = 本次 task 总数**（不是成功详情数），便于与 `list-tasks` 的 `count` 对比：`list-tasks count == export rows` 说明没漏 task；`failed_details_count > 0` 说明有详情没拉到，可重跑或查 `Export Errors`。
+- **`_request()` 带 timeout + 瞬时重试**：默认 timeout `(connect=10s, read=60s)`；对 `Timeout` / `ConnectionError` / HTTP `429/502/503/504` 最多重试 3 次（backoff 1s→2s），日志只进 stderr、不含 token。
+- **`export --details` 单个 task 失败不中断**：主详情失败记入 `failed_details`（进 `Export Errors`）；`Task Summary` 仍保留该 task 一行。MTT 的 mapping/runtime/connection **enrichment 失败**只记为 `enrichment_warnings`（字段留空），**不**计入 `failed_details`、不终止导出。
 
-#### 导出判定标准（v0.1.1 起）
+#### 导出判定标准
 
-| 判定 | 含义 |
+| 计数 | 含义 |
 |------|------|
-| `rows` | 本次导出的 task 总数，应与同参数 `list-tasks` 的 `count` 一致 |
-| `rows == list-tasks count` | 仅表示 `Task Summary` **没有丢 task**；**不代表**所有 task 详情都成功 |
-| **完整成功** | 需同时满足 `rows == list-tasks count` **且** `failed_details_count == 0` |
-| `failed_details_count > 0` | Excel 已生成，但**部分 task 详情拉取失败**：打开 `Export Errors` sheet 查看失败 task（及 `error_type`/`error`），按需**重跑该类型导出** |
+| `task_count` | 本次导出的逻辑 task 数，应与同参数 `list-tasks` 的 `count` 一致 |
+| `rows` | Task Summary 实际物理数据行数（MTT 展开后可能 **大于** `task_count`） |
+| **完整成功** | `task_count == list-tasks count` **且** `failed_details_count == 0` |
+| `enrichment_warnings_count > 0` | 部分 mapping/runtime/connection 未解析，字段留空；不影响完整性判定，可查 `Export Errors` |
 
-> 建议核对流程：先 `list-tasks --type X` 记下 `count`，再 `export --type X`，对比 stdout 的 `rows` 与 `count` 是否相等，并检查 `failed_details_count` 是否为 0。两者都满足才算该类型导出完整成功。
+> 核对流程：先 `list-tasks --type X` 记下 `count`，再 `export --type X`，确认 stdout 的 `task_count` 与 `count` 相等且 `failed_details_count == 0`。**不要**用 `rows == count` 判断完整性（MTT 会展开成多行）。
 
 ---
 
@@ -413,11 +417,11 @@ python smoke_test.py
 ## 已知限制（v0.1 边界）
 
 - **只读**：没有任何写操作子命令，代码层面 `update`/`batch`/`safety` 相关文件都不存在，不是靠权限拦截。
-- **DSS 的 `runtime_agent` 恒为空**：API 数据限制，见上方 `get-task` 说明。
+- **DSS 的 `runtime_environment.name` 恒为空**：API 数据限制，见上方 `get-task` 说明。
 - **同名 task 跨文件夹无法可靠区分**：务必带 `--folder`。
 - **MTT / WORKFLOW 的 runtime / connection 字段结构未深度验证**：v0.1 主要在 DSS 上做了完整字段验证。
 - **Token 不会自动刷新**：过期后需要重新从浏览器手动获取。
-- **Excel 自 v0.1.1 起导出 `Task Summary` + `Export Errors` 两个 sheet**（原 `Field Mapping` / `Truncation Risk` 已移除）；`source_objects` / `target_object` 为 best-effort，缺失留空、不报错。
+- **Excel 导出 `Task Summary`（23 列）+ `Export Errors` 两个 sheet**（原 `Field Mapping` / `Truncation Risk` 已移除）；MTT 按 transformation 展开成多行，`task_count` 与 `rows` 分离。
 
 ---
 

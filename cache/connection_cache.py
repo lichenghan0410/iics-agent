@@ -38,3 +38,38 @@ class ConnectionCache:
         name = fetch_fn(connection_id)
         self.set(connection_id, name)
         return name
+
+
+_MISSING = object()
+
+
+class ObjectCache:
+    """通用 id→值 内存缓存（值可为 dict/str 等），session 级别，进程退出即清空。
+
+    用于 Mapping / Runtime Environment 等 by-id enrichment 结果缓存；
+    同一 id 一次 export 进程内只会真实 fetch 一次。
+    """
+
+    def __init__(self):
+        self._cache: dict = {}
+
+    def get(self, key: str):
+        if not key:
+            return None
+        return self._cache.get(key, None)
+
+    def set(self, key: str, value) -> None:
+        if not key:
+            return
+        self._cache[key] = value
+
+    def get_or_fetch(self, key: str, fetch_fn: Callable[[str], object]):
+        """命中缓存直接返回（含缓存的 None/空值）；未命中调用 fetch_fn 并写入。"""
+        if not key:
+            return fetch_fn(key)
+        cached = self._cache.get(key, _MISSING)
+        if cached is not _MISSING:
+            return cached
+        value = fetch_fn(key)
+        self._cache[key] = value
+        return value

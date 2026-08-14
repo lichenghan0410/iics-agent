@@ -502,7 +502,8 @@ def export_results(
         "enrichment_warnings_count": 0, "enrichment_warnings": [],
         "summary": "..."
     }
-    Excel 输出：业务数据主 sheet `Task Summary`（Amendment 3 起 23 列，含 MTT 增强列）+
+    Excel 输出：业务数据主 sheet `Task Summary`（Amendment 4 起 22 列；已删除始终为空的
+    Mapping Location）+
     错误/警告 sheet `Export Errors`。MTT 每个 Source/Target transformation = 1 行；
     DSS/WORKFLOW 仍 1 task = 1 行。原 Field Mapping / Truncation Risk 已移除。
     完整成功条件：task_count == list_tasks.count 且 failed_details_count == 0
@@ -975,10 +976,12 @@ API 契约（V3 端点、`skip` 分页、小写 `and`、V2 by-name 均不变）�
 transformations 等）、`export_results` 契约（task_count/rows 分离、双 sheet）、Smoke Test 4、
 D-4/export 流程、Amendment 2 中 `id（federated）/id_type` 的描述均标注被本 Amendment 修正。
 
-### Task Summary 列（23 列，DSS/WORKFLOW 共用，MTT 专属列留空）
+### Task Summary 列（**Amendment 4 修正为 22 列**，DSS/WORKFLOW 共用，MTT 专属列留空）
+
+> 原 23 列含 `Mapping Location`，已被 Amendment 4 删除（始终为空、无业务价值）。
 
 `@type, id, orgId, Task Name, Task Type, Task Location, Runtime Environment, Task Updated On,
-Mapping Name, Mapping Location, Mapping Updated On, Transformation Name, Source Connection,
+Mapping Name, Mapping Updated On, Transformation Name, Source Connection,
 Source Object, Custom Query, Target Connection, Operation, Target Object,
 Parameter File Directory, Parameter File Name, Pre-Processing Commands, Post-Processing Commands, Status`
 
@@ -990,4 +993,53 @@ Parameter File Directory, Parameter File Name, Pre-Processing Commands, Post-Pro
   建议按 Runbook §6.3 用真实 MTT task 跑一次。
 - 多对象 `extendedObject.objects[]`（length > 1）：防御性实现，**尚无真实样本验证**。
 
-*相关提交：本次（`feat: enrich MTT metadata and export rows`）。*
+*相关提交：`af2bcec`（`feat: enrich MTT metadata and export rows`）。*
+
+---
+
+## Amendment 4 — MTT Transformation Name & Compact Query Output & Mapping Location Cleanup
+
+**性质**：v0.1 只读边界内的小范围改进，不新增写操作 / 顶级子命令 / 依赖。DSS / WORKFLOW
+detail route 与行为完全不变。
+
+### 变更点
+
+1. **Transformation Name 优先级修正**：真实样本 `s_IFA_V_PV_CAE_S_01` 证明 `parameter.label`
+   可能只是 connection parameter 的 display label（如 `DBConnection_awsoracle`）。**新规则**：
+   `parameter.name`（去首尾 `$`）**优先**，仅在 name 缺失/空时 fallback `parameter.label`。
+   例：`$SQ_001$ → SQ_001`、`$T_BI_CALL2_DETAIL_VOD_STGDB$ → T_BI_CALL2_DETAIL_VOD_STGDB`，
+   **不再**得到 `DBConnection_awsoracle`。
+   **（反向修正 Amendment 3 中「label → name」的旧优先级——正文 `_transformation_name` 契约以此为准。）**
+2. **`get-task MTT` 默认 compact 输出**：默认返回 `{task_count, rows, records[]}`，`records` 每条
+   为与 Excel `Task Summary` 完全相同的业务字段（一个 transformation = 一条 record）；无有效
+   transformation 时 `rows=1`、一条 task-level 基础行。**compact 不含** raw / federated_id /
+   detail_route / enrichment_warnings / connection·mapping·runtime ID。
+3. **新增 `--full`**：MTT 下 `--full` 返回 Amendment 3 的完整 normalized detail（诊断/API 分析用，
+   只读）。仅 `task_type == MTT` 时按 `--full` 分支；DSS / WORKFLOW 保持现状（扁平 dict）。
+4. **共享 row builder**：`tools/exporter.build_task_summary_rows(detail)` 为 Excel export 与 CLI
+   compact **共用**，`get-task` 看到的字段/值 == Excel。`get_task_detail()` 返回值**不变**
+   （compact/full 区分只在 CLI 输出层；smoke_test Test 4 仍直接断言完整 detail）。
+5. **输出结构不对称（显式文档化）**：`get-task` 顶层结构因 task_type 而异——
+   MTT → `{task_count, rows, records[]}`；DSS / WORKFLOW → 单个扁平 dict。脚本调用方须先判 task_type。
+6. **删除 Excel / compact 的 `Mapping Location`**：Mapping V2 无可靠 path/location/folder，该列始终
+   为空、无业务价值。Task Summary 由 23 列 → **22 列**；compact records 同样不含。
+7. **normalized `task_mapping.location = null` 保留**（供 `--full` 与未来 enrichment）；本次仅删
+   业务展示层，不删 schema 字段。**禁止**推测 Mapping Location（不得 = Task Location、不据 name/
+   folder/mappingId 猜测、不实现 `assetFrsGuid → V3 MAPPING → path`——仍属待验证）。
+8. **空值规则（compact JSON）**：可选字段键缺失（parameterFileDir/preProcessingCmd/enrichment
+   失败的 Mapping/Runtime 等）→ `null`；transformation 对侧不适用字段（Source 行的 Target 侧、
+   Target 行的 Source 侧）→ `""`。Excel 中两者均显示空白。
+
+### 不变项
+
+MTT FRS 路由、runtime/mapping/connection enrichment、缓存、`task_count`/`rows` 语义、
+DSS/WORKFLOW route、workbook 结构（`Task Summary` + `Export Errors`，不新增 sheet、不恢复
+`Field Mapping`/`Truncation Risk`、不实现 merge cells）——全部保持 Amendment 3。
+
+### 已验证 / 待确认
+
+- Transformation Name 新规则、compact/full 分离、共享 row builder、22 列、Mapping Location 删除：
+  fake 测试 A–L 覆盖。
+- Mapping Location 仍 **unavailable**，未解决、不推测。
+
+*相关提交：本次（`fix: refine MTT transformation and query output`）。*

@@ -29,7 +29,7 @@ import sys
 
 from iics_client import SessionManager, IICSClient
 from tools.query import list_tasks, get_task_detail, resolve_connection
-from tools.exporter import export_results
+from tools.exporter import export_results, build_task_summary_rows, compact_record
 
 
 def create_client() -> IICSClient:
@@ -74,6 +74,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--folder", default="",
         help="MTT 必需（用于 V3 定位 federated id）；DSS/WORKFLOW 可选",
     )
+    p_get.add_argument(
+        "--full", action="store_true",
+        help="MTT：输出完整 normalized detail（诊断用，只读，不涉及写操作）；"
+             "默认输出 Task Summary 同款业务字段（compact records）",
+    )
     p_get.add_argument("--no-resolve", action="store_true")
 
     # resolve-connection
@@ -106,13 +111,22 @@ def _cmd_list_tasks(client, args) -> dict:
 
 def _cmd_get_task(client, args) -> dict:
     _log(f"running get-task {args.name} {args.type} folder={args.folder}")
-    return get_task_detail(
+    detail = get_task_detail(
         client,
         task_name=args.name,
         task_type=args.type,
         folder_path=args.folder,
         resolve_connections=not args.no_resolve,
     )
+    if isinstance(detail, dict) and "error" in detail:
+        return detail
+    # MTT 默认输出 compact records（与 Excel Task Summary 一致）；--full 输出完整 detail。
+    # DSS / WORKFLOW 保持现状（扁平 dict），--full 不改变其行为。
+    if args.type == "MTT" and not getattr(args, "full", False):
+        rows = build_task_summary_rows(detail, args.folder)
+        records = [compact_record(r) for r in rows]
+        return {"task_count": 1, "rows": len(records), "records": records}
+    return detail
 
 
 def _cmd_resolve_connection(client, args) -> dict:

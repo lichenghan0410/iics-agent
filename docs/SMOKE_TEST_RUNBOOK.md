@@ -292,7 +292,9 @@ Transformation（只来自 MTT `parameters[]`）：
 
 - [ ] `3 Source + 1 Target → 4 transformations / 4 Excel 行`；`1 Source + 1 Target → 2 / 2`。
 - [ ] `customQuery` 非空 → Source Object 为空、Custom Query 保留。
-- [ ] transformation name 按 `label → name`（去首尾 `$`）优先级。
+- [ ] transformation name 按 **`name`（去首尾 `$`）→ fallback `label`** 优先级（Amendment 4）。
+      真实样本 `s_IFA_V_PV_CAE_S_01`：SOURCE → `SQ_001`、TARGET → `T_BI_CALL2_DETAIL_VOD_STGDB`，
+      **不得**得到 `DBConnection_awsoracle`。
 - [ ] source/target connection name 可解析；optional key 缺失不报错（空白单元格）。
 - [ ] 多 source object 单元格开启 wrap text。
 
@@ -310,6 +312,22 @@ Transformation（只来自 MTT `parameters[]`）：
 缓存：
 
 - [ ] 一次 export 内同一 `connectionId` / `mappingId` / `runtimeEnvironmentId` 只请求一次。
+
+### 6.4 MTT compact / --full 与 22 列（Amendment 4）
+
+get-task：
+
+- [ ] 默认 `get-task NAME MTT --folder F` 返回 `{task_count, rows, records[]}`；`records` 每条
+      恰为 22 个 Task Summary 业务字段（一个 transformation = 一条 record）。
+- [ ] 默认 compact **不含** `raw` / `federated_id` / `detail_route` / `enrichment_warnings`。
+- [ ] `--full` 返回完整 normalized detail（含 `raw` / `federated_id` / `detail_route` / `transformations`）。
+- [ ] DSS / WORKFLOW `get-task` 仍为扁平 dict（无 `records`），结构与 MTT 不对称。
+
+Excel / schema：
+
+- [ ] `Task Summary` header 恰为 **22 列**，**不含 `Mapping Location`**。
+- [ ] compact record 与 Excel 单元格 **字段名与值一致**（同一 row builder）。
+- [ ] normalized detail 的 `task_mapping.location` 仍为 `null`（`--full` 可见）。
 
 ---
 

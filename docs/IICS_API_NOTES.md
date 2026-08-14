@@ -210,6 +210,26 @@ Mapping parameters 示例顺序：Target → Source
 因此 **Transformation（顺序 / 运行时覆盖值 / Source-Target 信息）只能来自
 `mttask/frs/{federated_id}.parameters[]`**，不得用 `mapping.parameters[]` 生成。
 
+#### 7.3.1 Transformation Name（真实样本 `s_IFA_V_PV_CAE_S_01`，Amendment 4）
+
+```
+SOURCE parameter：name = $SQ_001$                     label = DBConnection_awsoracle
+TARGET parameter：name = $T_BI_CALL2_DETAIL_VOD_STGDB$ label = DBConnection_awsoracle
+```
+
+**结论**：`parameter.label` 可能只是 connection parameter 的 display label（此例两侧 label 都是
+`DBConnection_awsoracle`），**不能作为 Transformation Name 第一优先级**。
+
+正式提取规则（Amendment 4）：**`parameter.name` 去首尾 `$` 优先 → 缺失/空时 fallback
+`parameter.label`**。据此得 `SQ_001` / `T_BI_CALL2_DETAIL_VOD_STGDB`。
+
+#### 7.3.2 Mapping Location
+
+`mapping/{id}` 无可靠 `path` / `location` / `folder` / `folderId`，故 **Mapping Location =
+unavailable / not resolved**（未解决）。Amendment 4 起从业务 Excel / compact 输出删除该列；
+normalized `task_mapping.location` 仍为 `null`。`mapping.assetFrsGuid ↔ V3 MAPPING → path` 链
+仍属**待验证**，未实现。
+
 ### 7.4 Multi-object（防御性，未真实验证）
 
 `extendedObject.objects[]` 代码按数组安全解析（保序去重、支持多值、Excel 同格换行）。

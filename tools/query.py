@@ -265,12 +265,19 @@ def _apply_extraction(client, detail, raw, task_type, resolve_connections):
 
 # ── MTT enrichment 辅助 ──────────────────────────────────────────────────────
 def _transformation_name(param: dict) -> str:
-    """transformation 名：优先 label，其次 name（去首尾 $）。"""
+    """transformation 名（Amendment 4）：优先 parameter.name（去首尾 $），
+    仅在 name 缺失/空时 fallback parameter.label。
+
+    实测：label 可能只是 connection parameter 的 display label（如
+    "DBConnection_awsoracle"），不能作为第一优先级。
+    """
+    raw_name = param.get("name")
+    if isinstance(raw_name, str) and raw_name.strip():
+        return raw_name.strip().strip("$")
     label = param.get("label")
-    if isinstance(label, str) and label:
-        return label
-    name = param.get("name", "")
-    return name.strip("$") if isinstance(name, str) else ""
+    if isinstance(label, str):
+        return label.strip()
+    return ""
 
 
 def _extract_source_object(param: dict):

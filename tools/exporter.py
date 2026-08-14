@@ -21,12 +21,12 @@ from pathlib import Path
 from openpyxl import Workbook
 from openpyxl.styles import Alignment
 
-# Task Summary 列顺序（23 列）
+# Task Summary 列顺序（Amendment 4：22 列，删除始终为空的 Mapping Location）
 _COLS = [
     "@type", "id", "orgId",
     "Task Name", "Task Type", "Task Location", "Runtime Environment",
     "Task Updated On",
-    "Mapping Name", "Mapping Location", "Mapping Updated On",
+    "Mapping Name", "Mapping Updated On",
     "Transformation Name", "Source Connection", "Source Object", "Custom Query",
     "Target Connection", "Operation", "Target Object",
     "Parameter File Directory", "Parameter File Name",
@@ -138,11 +138,11 @@ def _task_level_row(rec: dict, top_folder: str) -> dict:
     row["Task Name"] = name
     row["Task Type"] = ttype
     row["Task Location"] = loc
-    row["Runtime Environment"] = rt_name or ""
+    # 缺失（情形 A）→ None（compact JSON 为 null；Excel 空白）
+    row["Runtime Environment"] = rt_name
     row["Task Updated On"] = rec.get("task_updated_on", "")
-    row["Mapping Name"] = mapping.get("name") or ""
-    row["Mapping Location"] = mapping.get("location") or ""   # 当前恒 None → 空
-    row["Mapping Updated On"] = mapping.get("updated_on") or ""
+    row["Mapping Name"] = mapping.get("name")
+    row["Mapping Updated On"] = mapping.get("updated_on")
     row["Parameter File Directory"] = pf.get("directory")
     row["Parameter File Name"] = pf.get("name")
     row["Pre-Processing Commands"] = ao.get("pre_processing_commands")
@@ -159,8 +159,12 @@ def _task_level_row(rec: dict, top_folder: str) -> dict:
     return row
 
 
-def _rows_for_record(rec: dict, top_folder: str) -> list:
-    """一条 detail/task 记录 → 若干 Task Summary 行（MTT 按 transformation 展开）。"""
+def build_task_summary_rows(rec: dict, top_folder: str = "") -> list:
+    """一条 normalized detail / task 记录 → 若干 Task Summary 行（22 列 dict）。
+
+    CLI 的 MTT compact get-task 与 Excel export 共用此 row builder，保证字段/值一致。
+    对侧不适用字段（情形 B）填 ""；缺失的可选字段（情形 A）保持 None。
+    """
     base = _task_level_row(rec, top_folder)
     is_mtt = rec.get("task_type") == "MTT" or rec.get("type") == "MTT"
     transforms = rec.get("transformations") if is_mtt else None
@@ -172,14 +176,22 @@ def _rows_for_record(rec: dict, top_folder: str) -> list:
     for t in transforms:
         row = dict(base)
         row["Transformation Name"] = t.get("name") or ""
-        sc = t.get("source_connection")
-        row["Source Connection"] = _conn_display(sc) if sc else ""
-        row["Source Object"] = t.get("source_object")     # str / list / "" / None
-        row["Custom Query"] = t.get("custom_query")
-        tc = t.get("target_connection")
-        row["Target Connection"] = _conn_display(tc) if tc else ""
-        row["Operation"] = t.get("operation")
-        row["Target Object"] = t.get("target_object")
+        if t.get("kind") == "source":
+            sc = t.get("source_connection")
+            row["Source Connection"] = _conn_display(sc) if sc else ""
+            row["Source Object"] = t.get("source_object")   # str / list / "" / None
+            row["Custom Query"] = t.get("custom_query")
+            row["Target Connection"] = ""   # 对侧不适用 → ""
+            row["Operation"] = ""
+            row["Target Object"] = ""
+        else:  # target
+            tc = t.get("target_connection")
+            row["Target Connection"] = _conn_display(tc) if tc else ""
+            row["Operation"] = t.get("operation")
+            row["Target Object"] = t.get("target_object")
+            row["Source Connection"] = ""   # 对侧不适用 → ""
+            row["Source Object"] = ""
+            row["Custom Query"] = ""
         out.append(row)
     return out
 
@@ -194,7 +206,7 @@ def _build_rows(data: dict) -> list:
     rows = []
     for rec in records:
         if isinstance(rec, dict):
-            rows.extend(_rows_for_record(rec, top_folder))
+            rows.extend(build_task_summary_rows(rec, top_folder))
     return rows
 
 
@@ -211,6 +223,15 @@ def _cell(v):
                 parts.append(s)
         return "\n".join(parts)
     return v
+
+
+# 供 CLI compact get-task 使用：与 Excel 完全相同的列名与单元格值
+TASK_SUMMARY_COLUMNS = list(_COLS)
+
+
+def compact_record(row: dict) -> dict:
+    """把 row builder 产出的行 dict 归一化为 compact record（值 == Excel 单元格值）。"""
+    return {c: _cell(row.get(c)) for c in _COLS}
 
 
 def _collect_enrichment_warnings(data: dict) -> list:

@@ -55,11 +55,15 @@ python iics_cli.py export <folder> [--type ALL] [--format excel|json] [--filenam
 - MTT 归一化 detail：顶层 `id`=classic V2 ID、`federated_id`=V3/FRS ID（**无 `id_type`**）。
 - runtime 字段统一为 `runtime_environment {id,name}`（旧名 `runtime_agent` 已弃用）；
   MTT 用 `runtimeEnvironmentId → runtimeEnvironment/{id}`，**不得**用 `agentId`。
-- mapping 用 `mappingId → mapping/{id}`（name/updated_on）；`Mapping Location` 恒 null，
-  **不得**等于 Task Location。
+- mapping 用 `mappingId → mapping/{id}`（name/updated_on）；`Mapping Location` **不可靠获取、
+  不得推测**（Amendment 4 起从业务 Excel / compact 删除；normalized `task_mapping.location` 仍 null）。
 - transformation **只来自 MTT `parameters[]`**（顺序保留、不去重、不取首尾），不得用 mapping parameters。
-- Excel：`Task Summary`（23 列）+ `Export Errors` 两个 sheet；**不得新增 MTT 专属 sheet**；
-  MTT 每个 transformation 一行。
+- **Transformation Name（Amendment 4）**：`parameter.name` 去首尾 `$` **优先**，name 缺失/空才
+  fallback `parameter.label`（label 可能只是 connection display label，不能作第一优先级）。
+- **`get-task MTT` 默认 compact output**（Task Summary 同款业务字段 records）；`--full` 才展示完整
+  normalized detail（诊断用）。DSS/WORKFLOW 保持扁平 dict、不受影响。`get_task_detail()` 返回值不变。
+- Excel：`Task Summary`（**Amendment 4 起 22 列**，删除 Mapping Location）+ `Export Errors` 两个 sheet；
+  **不得新增 MTT 专属 sheet**；MTT 每个 transformation 一行。
 - 计数：`task_count`（==list_tasks.count）与 `rows`（物理行数）**分离**；完整成功=task_count 一致
   且 failed_details_count==0；**不得**用 `rows==task_count` 判断。
 - enrichment（mapping/runtime/connection）失败 → `enrichment_warnings`，**不**计入 `failed_details`、不终止导出。

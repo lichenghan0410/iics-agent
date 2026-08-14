@@ -287,6 +287,21 @@ python iics_cli.py get-task DI_FACT_SALES_DAILY DSS --folder JAPAN_SCRM_DI
 >
 > MTT 不支持直接使用 `--id`。**DSS / WORKFLOW** 的 `--folder` 仍为可选，且它们跨文件夹同名时仍可能有歧义（建议也带上 `--folder`）。
 
+**MTT `get-task` 默认输出（运维用）** 只显示与 Excel `Task Summary` 相同的业务字段，一个 transformation 一条 record：
+
+```powershell
+python .\iics_cli.py get-task TASK_NAME MTT --folder JAPAN_SCRM_BAU
+# → {"task_count": 1, "rows": 2, "records": [ {业务字段…}, … ]}
+```
+
+需要完整内部结构（`raw` / `federated_id` / `transformations` 等，调试/分析用）时加 `--full`：
+
+```powershell
+python .\iics_cli.py get-task TASK_NAME MTT --folder JAPAN_SCRM_BAU --full
+```
+
+> **注意：返回结构因 task 类型而异，不能用同一套解析逻辑**——**MTT** 返回 `{task_count, rows, records[]}`；**DSS / WORKFLOW** 返回单个 task 的扁平字典（无 `records` 包装）。脚本化调用请先判断 `task_type`。
+
 ### 3. `resolve-connection` — 解析 connection ID
 
 ```powershell
@@ -352,7 +367,7 @@ Excel 含 2 个 sheet（原 `Field Mapping` / `Truncation Risk` 已移除）：
 
 | Sheet | 说明 |
 |-------|------|
-| Task Summary | 业务数据主 sheet，共 23 列（`@type, id, orgId, Task Name, Task Type, Task Location, Runtime Environment, Task Updated On, Mapping Name, Mapping Location, Mapping Updated On, Transformation Name, Source Connection, Source Object, Custom Query, Target Connection, Operation, Target Object, Parameter File Directory, Parameter File Name, Pre-Processing Commands, Post-Processing Commands, Status`）。**DSS / WORKFLOW：1 task = 1 行；MTT：每个 Source/Target transformation = 1 行**（任务级字段每行重复），MTT 专属列对 DSS/WORKFLOW 留空。多个 source object 在同一单元格换行显示。 |
+| Task Summary | 业务数据主 sheet，共 22 列（`@type, id, orgId, Task Name, Task Type, Task Location, Runtime Environment, Task Updated On, Mapping Name, Mapping Updated On, Transformation Name, Source Connection, Source Object, Custom Query, Target Connection, Operation, Target Object, Parameter File Directory, Parameter File Name, Pre-Processing Commands, Post-Processing Commands, Status`）。**DSS / WORKFLOW：1 task = 1 行；MTT：每个 Source/Target transformation = 1 行**（任务级字段每行重复），MTT 专属列对 DSS/WORKFLOW 留空。多个 source object 在同一单元格换行显示。（`Mapping Location` 因 API 无可靠来源、始终为空，已删除。） |
 | Export Errors | 错误 / 警告记录：主详情失败记为 `error`，enrichment（mapping/runtime/connection）失败记为 `warning`；都没有时写单行 `No export errors`。 |
 
 > 一个文件夹可能有上千个 task，`--details` 模式会对每个 task 单独调用一次详情接口，文件夹大时会比较慢。快速预览用 `--summary-only`。
@@ -421,7 +436,7 @@ python smoke_test.py
 - **同名 task 跨文件夹无法可靠区分**：务必带 `--folder`。
 - **MTT / WORKFLOW 的 runtime / connection 字段结构未深度验证**：v0.1 主要在 DSS 上做了完整字段验证。
 - **Token 不会自动刷新**：过期后需要重新从浏览器手动获取。
-- **Excel 导出 `Task Summary`（23 列）+ `Export Errors` 两个 sheet**（原 `Field Mapping` / `Truncation Risk` 已移除）；MTT 按 transformation 展开成多行，`task_count` 与 `rows` 分离。
+- **Excel 导出 `Task Summary`（22 列）+ `Export Errors` 两个 sheet**（原 `Field Mapping` / `Truncation Risk` 已移除；`Mapping Location` 因始终为空已删除）；MTT 按 transformation 展开成多行，`task_count` 与 `rows` 分离。
 
 ---
 

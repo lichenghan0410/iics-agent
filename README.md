@@ -287,6 +287,21 @@ python iics_cli.py get-task DI_FACT_SALES_DAILY DSS --folder JAPAN_SCRM_DI
 >
 > MTT は `--id` の直接指定に対応しません。**DSS / WORKFLOW** の `--folder` は任意のままで、これらはフォルダをまたいだ同名で曖昧さが残る可能性があります（`--folder` の付与を推奨）。
 
+**MTT `get-task` の既定出力（運用向け）** は Excel `Task Summary` と同じ業務フィールドのみ、transformation 1 件 = record 1 件：
+
+```powershell
+python .\iics_cli.py get-task TASK_NAME MTT --folder JAPAN_SCRM_BAU
+# → {"task_count": 1, "rows": 2, "records": [ {業務フィールド…}, … ]}
+```
+
+完全な内部構造（`raw` / `federated_id` / `transformations` 等、診断・分析用）が必要な場合は `--full`：
+
+```powershell
+python .\iics_cli.py get-task TASK_NAME MTT --folder JAPAN_SCRM_BAU --full
+```
+
+> **注意：戻り値の構造は task 種別で異なり、同一の解析ロジックは使えません**——**MTT** は `{task_count, rows, records[]}`、**DSS / WORKFLOW** は単一 task のフラットな辞書（`records` 包装なし）を返します。スクリプトからは先に `task_type` を判定してください。
+
 ### 3. `resolve-connection` — connection ID の解決
 
 ```powershell
@@ -352,7 +367,7 @@ Excel は 2 つの sheet を含みます（旧 `Field Mapping` / `Truncation Ris
 
 | Sheet | 説明 |
 |-------|------|
-| Task Summary | 業務データ主 sheet、23 列（`@type, id, orgId, Task Name, Task Type, Task Location, Runtime Environment, Task Updated On, Mapping Name, Mapping Location, Mapping Updated On, Transformation Name, Source Connection, Source Object, Custom Query, Target Connection, Operation, Target Object, Parameter File Directory, Parameter File Name, Pre-Processing Commands, Post-Processing Commands, Status`）。**DSS / WORKFLOW：1 task = 1 行；MTT：各 Source/Target transformation = 1 行**（タスク級フィールドは各行に繰り返し）。MTT 専用列は DSS/WORKFLOW では空。複数 source object は同一セル内で改行表示。 |
+| Task Summary | 業務データ主 sheet、22 列（`@type, id, orgId, Task Name, Task Type, Task Location, Runtime Environment, Task Updated On, Mapping Name, Mapping Updated On, Transformation Name, Source Connection, Source Object, Custom Query, Target Connection, Operation, Target Object, Parameter File Directory, Parameter File Name, Pre-Processing Commands, Post-Processing Commands, Status`）。**DSS / WORKFLOW：1 task = 1 行；MTT：各 Source/Target transformation = 1 行**（タスク級フィールドは各行に繰り返し）。MTT 専用列は DSS/WORKFLOW では空。複数 source object は同一セル内で改行表示。（`Mapping Location` は API に信頼できる取得元がなく常に空のため削除。） |
 | Export Errors | エラー / 警告記録：主詳細の失敗は `error`、enrichment（mapping/runtime/connection）失敗は `warning`。どちらも無ければ 1 行 `No export errors`。 |
 
 > フォルダには数千の task が存在し得ます。`--details` は task ごとに詳細を 1 回ずつ呼ぶため大きなフォルダでは時間がかかります。素早く一覧だけ見たい場合は `--summary-only`。
@@ -421,7 +436,7 @@ python smoke_test.py
 - **同名 task をフォルダ間で確実に区別できない**：必ず `--folder` を付けてください。
 - **MTT / WORKFLOW の runtime / connection フィールド構造は未検証**：v0.1 は主に DSS で完全なフィールド検証を実施。
 - **Token は自動更新されない**：失効後はブラウザから手動で再取得が必要。
-- **Excel は `Task Summary`（23 列）+ `Export Errors` の 2 sheet を出力**（旧 `Field Mapping` / `Truncation Risk` は削除）。MTT は transformation 単位で複数行に展開され、`task_count` と `rows` は分離。
+- **Excel は `Task Summary`（22 列）+ `Export Errors` の 2 sheet を出力**（旧 `Field Mapping` / `Truncation Risk` は削除；`Mapping Location` は常に空のため削除）。MTT は transformation 単位で複数行に展開され、`task_count` と `rows` は分離。
 
 ---
 

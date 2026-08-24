@@ -371,6 +371,26 @@ Excel 含 2 个 sheet（原 `Field Mapping` / `Truncation Risk` 已移除）：
 | Export Errors | 错误 / 警告记录：主详情失败记为 `error`，enrichment（mapping/runtime/connection）失败记为 `warning`；都没有时写单行 `No export errors`。 |
 
 > 一个文件夹可能有上千个 task，`--details` 模式会对每个 task 单独调用一次详情接口，文件夹大时会比较慢。快速预览用 `--summary-only`。
+>
+> 上表为 DSS / MTT / `--type ALL` 的通用列。**`--type WORKFLOW` 使用独立的 9 列 schema，见下。**
+
+#### `--type WORKFLOW` 导出（child task 展开）
+
+```powershell
+python .\iics_cli.py export JAPAN_SCRM_DI --type WORKFLOW --format excel
+```
+
+WORKFLOW 的 `Task Summary` 使用**专用 9 列**：`Task Type, folder, orgId, id, Task Name, updateTime, tasks.taskId, tasks.type, tasks.name`。
+
+**每个 workflow 的 `tasks[]` child 独立占一行**；父级字段（`Task Type` / `folder` / `orgId` / `id` / `Task Name` / `updateTime`）在每行重复；child 字段（`tasks.taskId` / `tasks.type` / `tasks.name`）单独展示。例：
+
+```text
+1 个 workflow + 2 个 child task → Excel 2 行（父级字段两行相同）
+```
+
+无 child task 的 workflow 仍占 1 行（child 三列留空）。`folder` 取自命令行的 `<FOLDER>`。WORKFLOW export 不查询 child 的 MTT/DSS 详情。**WORKFLOW `get-task` 输出不变**（仍为完整扁平 detail）。
+
+> `--type ALL` 导出时：通用 `Task Summary`（DSS + MTT）之外，额外生成一张 **`Workflow Tasks`** sheet（WORKFLOW 的 9 列 child 展开）；没有 WORKFLOW 时不生成该 sheet。
 
 ### 稳定性与导出判定
 

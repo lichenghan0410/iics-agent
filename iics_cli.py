@@ -202,7 +202,8 @@ def _cmd_export(client, args) -> dict:
         "failed_details": failed_details,
     }
     return export_results(
-        client, data=data, format=args.format, filename=args.filename
+        client, data=data, format=args.format, filename=args.filename,
+        export_type=args.type,
     )
 
 

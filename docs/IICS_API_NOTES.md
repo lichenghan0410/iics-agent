@@ -236,6 +236,26 @@ normalized `task_mapping.location` 仍为 `null`。`mapping.assetFrsGuid ↔ V3 
 但**当前真实样本均为** `singleMode = true`、`extendedObject.objects.length = 1`；
 多对象场景属防御性实现，**尚未真实验证**。
 
+### 7.5 WORKFLOW 详情与 child tasks（Amendment 5）
+
+`GET /saas/api/v2/workflow/name/{name}` 顶层实测字段：`@type` / `id`（classic V2）/ `orgId` /
+`name` / `createTime` / `updateTime` / `tasks[]` 等。真实样本
+`TF_DI_JPN_GDM_BI_DWH_AYU_M_JGI_MST`（`JAPAN_SCRM_DI`）：
+
+```
+id = 000LVU0N0000000002JV, orgId = 000LVU, updateTime = 2025-12-16T01:12:02.000Z
+tasks = [
+  {taskId: 000LVU0Z000000006V4F, type: MTT, name: mt_..._WK,  stopOnError, stopOnWarning},
+  {taskId: 000LVU0Z00000000087Z, type: MTT, name: mt_...},
+]
+```
+
+- `tasks[]` 是 WORKFLOW child row 展开的**权威来源**；每个 child = 1 Excel 行。
+- export 只使用 child 的 `taskId` / `type` / `name`（`stopOnError` / `stopOnWarning` 存在但本次
+  **不导出**）。
+- child `taskId` 按 V2 response 原样保留，**不做 ID 类型推断**（不得当作 V3 federated ID）。
+- WORKFLOW export **不查询** child 的 MTT/DSS 详情（不新增请求）。
+
 ---
 
 ## 8. 对 ADR-001「v2 前需重新确认项」的结论

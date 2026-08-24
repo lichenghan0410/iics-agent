@@ -329,6 +329,25 @@ Excel / schema：
 - [ ] compact record 与 Excel 单元格 **字段名与值一致**（同一 row builder）。
 - [ ] normalized detail 的 `task_mapping.location` 仍为 `null`（`--full` 可见）。
 
+### 6.5 WORKFLOW export child 展开（Amendment 5）
+
+真实样本 `TF_DI_JPN_GDM_BI_DWH_AYU_M_JGI_MST`（`JAPAN_SCRM_DI`，2 个 child MTT）：
+
+```powershell
+python .\iics_cli.py export JAPAN_SCRM_DI --type WORKFLOW --format excel
+```
+
+- [ ] 该 workflow 在 Excel 中出现 **2 行**；父字段（含 `folder = JAPAN_SCRM_DI`）两行完全一致。
+- [ ] child rows：`000LVU0Z000000006V4F / MTT / mt_..._WK` 与 `000LVU0Z00000000087Z / MTT / mt_...`。
+- [ ] `Task Summary` header 恰为 **9 列**（`Task Type, folder, orgId, id, Task Name, updateTime,
+      tasks.taskId, tasks.type, tasks.name`）；无 `runtime_environment` / `Mapping Name` /
+      `Transformation Name` / `Connection` 等通用列。
+- [ ] 每个 WORKFLOW 仅 1 个 `workflow/name/{name}` 请求；无 `mttask/*` / `dsstask/*` /
+      `workflow/{childId}` child 请求。
+- [ ] zero-child workflow 仍占 1 行；detail 失败保留 1 fallback 行并计入 `rows`。
+- [ ] `task_count == list-tasks count`；`rows = Σ max(1, child 数)`，可 > task_count。
+- [ ] WORKFLOW `get-task` 输出不变（扁平 dict）。
+
 ---
 
 ## 7. 常见失败与排查

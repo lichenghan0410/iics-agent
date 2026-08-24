@@ -74,6 +74,18 @@ python iics_cli.py export <folder> [--type ALL] [--format excel|json] [--filenam
 - **不得**用 V3 federated ID 调 V2 by-id（实测返回 500，是 MTT 类型特例）。
 - 保持现状 V2 by-name；跨 folder 同名仍是已知限制。
 
+## WORKFLOW export 规则（Amendment 5）
+
+- WORKFLOW 详情继续用 `workflow/name/{name}`（不改路由；不得把 child `taskId` 当 V3 federated ID）。
+- WORKFLOW export **只展开 `raw.tasks[]`**：一个 child = 一行；**不得**为 child 再查
+  `mttask/{id}` / `mttask/name/{name}` / `workflow/{child_id}` 等 child 详情。
+- WORKFLOW Excel 用**独立 9 列 schema**：`Task Type, folder, orgId, id, Task Name, updateTime,
+  tasks.taskId, tasks.type, tasks.name`（含 `folder`，取自 export 的 `<FOLDER>`）。父字段逐行重复。
+- 无 child 的 workflow 仍保留 1 行；detail 失败保留 1 fallback 行并计入 `rows`（按 `max(1,len)`）。
+- WORKFLOW `get-task` 输出不变。
+- `--type WORKFLOW` 单类型：单张 9 列 `Task Summary`。**`--type ALL`：通用 `Task Summary`（DSS+MTT）
+  + 单独 `Workflow Tasks`（9 列 child 展开）+ `Export Errors`**（Li 已确认分表方案）。
+
 ## 安全边界
 
 - v0.1 只读模式，以下操作不可用且不得实现：update、batch、write 相关子命令

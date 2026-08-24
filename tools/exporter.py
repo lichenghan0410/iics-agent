@@ -37,6 +37,20 @@ _SOURCE_OBJECT_COL = _COLS.index("Source Object")  # 0-based；用于 wrap text
 
 _EXPORT_ERROR_HEADERS = ["level", "task_name", "task_type", "folder", "error_type", "error"]
 
+# WORKFLOW 专用 Task Summary 列（Amendment 5）——独立 9 列 schema，
+# 命名风格（Task Type / folder / ...）与通用列有意不同，不与 MTT/DSS 对齐。
+WORKFLOW_HEADERS = [
+    "Task Type",
+    "folder",
+    "orgId",
+    "id",
+    "Task Name",
+    "updateTime",
+    "tasks.taskId",
+    "tasks.type",
+    "tasks.name",
+]
+
 
 def _conn_display(conn) -> str:
     """优先 connection name，否则 id，否则空。"""
@@ -196,6 +210,44 @@ def build_task_summary_rows(rec: dict, top_folder: str = "") -> list:
     return out
 
 
+def build_workflow_summary_rows(rec: dict, folder_path: str) -> list:
+    """WORKFLOW 记录 → 若干 9 列 row dict（一个 raw.tasks[] child = 一行）。
+
+    - 父字段权威来源为 workflow V2 payload（rec["raw"]）；folder 来自 export 的 folder_path。
+    - tasks 为空/缺失/非 list → 保留 1 行，child 三列为 ""。
+    - child 字段缺失 → ""（非 failed / 非 enrichment failure）。
+    - 不查询任何 child detail（只读 raw.tasks[]）。
+    """
+    raw = rec.get("raw") if isinstance(rec.get("raw"), dict) else {}
+    parent = {
+        "Task Type": "WORKFLOW",
+        "folder": folder_path or rec.get("folder") or rec.get("task_location") or "",
+        "orgId": raw.get("orgId", ""),
+        "id": raw.get("id", ""),
+        "Task Name": raw.get("name") or rec.get("name") or rec.get("task_name") or "",
+        "updateTime": raw.get("updateTime", ""),
+    }
+    tasks = raw.get("tasks")
+    if not isinstance(tasks, list) or not tasks:
+        row = dict(parent)
+        row["tasks.taskId"] = ""
+        row["tasks.type"] = ""
+        row["tasks.name"] = ""
+        return [row]
+
+    out = []
+    for t in tasks:
+        row = dict(parent)
+        if isinstance(t, dict):
+            row["tasks.taskId"] = t.get("taskId") or ""
+            row["tasks.type"] = t.get("type") or ""
+            row["tasks.name"] = t.get("name") or ""
+        else:
+            row["tasks.taskId"] = row["tasks.type"] = row["tasks.name"] = ""
+        out.append(row)
+    return out
+
+
 def _build_rows(data: dict) -> list:
     details = data.get("details")
     top_folder = data.get("folder", "")
@@ -260,8 +312,13 @@ def export_results(
     data: dict,
     format: str = "excel",
     filename: str = "",
+    export_type: str = "",
 ) -> dict:
-    """导出为 Excel（Task Summary + Export Errors）/ JSON。client 未使用，保留契约。"""
+    """导出为 Excel（Task Summary + Export Errors）/ JSON。client 未使用，保留契约。
+
+    export_type == "WORKFLOW" 时 Task Summary 使用 9 列 WORKFLOW 专用 schema（child 展开）；
+    其它（含 ALL / DSS / MTT）沿用通用列 schema，行为不变。
+    """
     try:
         if format not in ("excel", "json"):
             return {"error": "format must be 'excel' or 'json'",
@@ -276,8 +333,42 @@ def export_results(
         filename = _ensure_suffix(filename, suffix)
         out_path = Path(filename).resolve()
 
-        data_rows = _build_rows(data)
-        rows = len(data_rows)
+        records = data.get("details")
+        records = (records if isinstance(records, list) and records
+                   else (data.get("tasks") or []))
+        records = [r for r in records if isinstance(r, dict)]
+        top_folder = data.get("folder", "")
+
+        def _is_wf(rec):
+            return rec.get("type") == "WORKFLOW" or rec.get("task_type") == "WORKFLOW"
+
+        def _generic_rows(recs):
+            out = []
+            for rec in recs:
+                out.extend(build_task_summary_rows(rec, top_folder))
+            return out
+
+        def _wf_rows(recs):
+            out = []
+            for rec in recs:
+                out.extend(build_workflow_summary_rows(rec, top_folder))
+            return out
+
+        # business_sheets: [(sheet_title, headers, rows)]
+        if export_type == "WORKFLOW":
+            business_sheets = [("Task Summary", WORKFLOW_HEADERS, _wf_rows(records))]
+        elif export_type == "ALL":
+            # ALL：通用 Task Summary（DSS+MTT）+ 单独 Workflow Tasks（9 列 child 展开）
+            wf_recs = [r for r in records if _is_wf(r)]
+            other = [r for r in records if not _is_wf(r)]
+            business_sheets = [("Task Summary", _COLS, _generic_rows(other))]
+            if wf_recs:
+                business_sheets.append(
+                    ("Workflow Tasks", WORKFLOW_HEADERS, _wf_rows(wf_recs)))
+        else:
+            business_sheets = [("Task Summary", _COLS, _generic_rows(records))]
+
+        rows = sum(len(rws) for _, _, rws in business_sheets)
         task_count = len(data.get("tasks") or [])
 
         failed = data.get("failed_details")
@@ -291,16 +382,19 @@ def export_results(
             )
         else:
             wb = Workbook()
-            ws = wb.active
-            ws.title = "Task Summary"
-            ws.append(_COLS)
             wrap = Alignment(wrap_text=True, vertical="top")
-            for r in data_rows:
-                ws.append([_cell(r.get(c)) for c in _COLS])
-                # 多对象 Source Object 换行 → wrap text
-                so = r.get("Source Object")
-                if isinstance(so, list) or (isinstance(so, str) and "\n" in so):
-                    ws.cell(row=ws.max_row, column=_SOURCE_OBJECT_COL + 1).alignment = wrap
+            for idx, (title, headers, rws) in enumerate(business_sheets):
+                ws = wb.active if idx == 0 else wb.create_sheet(title)
+                ws.title = title
+                ws.append(headers)
+                is_generic = headers is _COLS
+                for r in rws:
+                    ws.append([_cell(r.get(c)) for c in headers])
+                    if is_generic:
+                        so = r.get("Source Object")
+                        if isinstance(so, list) or (isinstance(so, str) and "\n" in so):
+                            ws.cell(row=ws.max_row,
+                                    column=_SOURCE_OBJECT_COL + 1).alignment = wrap
 
             ws_err = wb.create_sheet("Export Errors")
             ws_err.append(_EXPORT_ERROR_HEADERS)

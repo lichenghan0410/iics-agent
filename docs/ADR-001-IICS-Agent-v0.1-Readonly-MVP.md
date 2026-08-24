@@ -1042,4 +1042,55 @@ DSS/WORKFLOW route、workbook 结构（`Task Summary` + `Export Errors`，不新
   fake 测试 A–L 覆盖。
 - Mapping Location 仍 **unavailable**，未解决、不推测。
 
-*相关提交：本次（`fix: refine MTT transformation and query output`）。*
+*相关提交：`cfb0332`（`fix: refine MTT transformation and query output`）。*
+
+---
+
+## Amendment 5 — WORKFLOW Child Task Export
+
+**性质**：v0.1 只读边界内的改进，仅针对 `export <FOLDER> --type WORKFLOW --format excel`。
+MTT / DSS 的查询与导出契约、WORKFLOW 的 `get-task` 与 detail route 均不变。
+
+### 变更点
+
+1. **WORKFLOW detail route 保持 `workflow/name/{name}`**（不改；不得用 V3 federated id 调 by-id）。
+2. **`raw.tasks[]` 是 WORKFLOW child row 的权威来源**；**一个 child task = 一个 Excel 行**。
+3. **父 workflow 字段逐行重复**：`Task Type`（恒 `WORKFLOW`）/ `folder`（来自 export 的
+   `folder_path`，非 detail）/ `orgId` / `id`（workflow V2 classic id）/ `Task Name` / `updateTime`。
+4. **WORKFLOW Excel 使用独立 9 列 schema**（有意与 MTT/DSS 通用列命名风格不同、不对齐）：
+   `Task Type, folder, orgId, id, Task Name, updateTime, tasks.taskId, tasks.type, tasks.name`。
+5. **不查询 child MTT/DSS 详情**（每个 WORKFLOW 仅 1 个 detail 请求；child 字段仅取自 `raw.tasks[]`；
+   缺失 → `""`，非 failed / 非 enrichment failure）。
+6. **zero-child / 缺 tasks / detail 失败**：仍保留至少 1 行（child 三列空）；detail 失败还计入
+   `failed_details` + `Export Errors`，fallback 行 Task Name 取 list_tasks 已知 name，其余留空。
+7. **count 语义**：`rows = Σ max(1, len(workflow.tasks))`（含 fallback 行按 1 计入）；`rows` 可
+   `> task_count`。完整成功仍为 `task_count == list_tasks.count` 且 `failed_details_count == 0`；
+   **不得**用 `rows == task_count`。
+8. **workbook 结构不变**：`Task Summary` + `Export Errors`，不新增 WORKFLOW 专属 sheet。
+
+### 对正文旧契约的反向修正
+
+Amendment 3/4 正文「DSS / WORKFLOW：1 task = 1 行」仅适用于**通用列 schema**（DSS / MTT /
+`--type ALL`）。`--type WORKFLOW` 单类型导出改用上述 9 列 child-expanded schema，
+**WORKFLOW 不再是 1 task = 1 行**（1 workflow → N 行，N = max(1, child 数)）。
+
+### `--type ALL` 决策（Li 确认：WORKFLOW 单独 sheet）
+
+`ALL` 原实现为「list_tasks(ALL) 合并三类 → 单张通用列 Task Summary」。WORKFLOW 的 9 列 child
+展开与通用列**字段集合不兼容**，无法在同一张表无损共存。经 Li 确认采用**分表**方案：
+
+- **`Task Summary`**（通用 22 列）：DSS + MTT 行；**ALL 下 WORKFLOW 不进此表**。
+- **`Workflow Tasks`**（WORKFLOW 专用 9 列，child 展开）：ALL 中的 WORKFLOW 记录；无 WORKFLOW 时不生成。
+- **`Export Errors`**：不变。
+- `rows` = 两张业务表物理数据行数之和；`task_count == list_tasks.count`。
+
+`--type WORKFLOW` 单类型导出仍是**单张 9 列 `Task Summary`**（不新增 sheet），与 ALL 下的
+`Workflow Tasks` 内容一致、仅所处 sheet 不同。
+
+### 已验证 / 待确认
+
+- WORKFLOW child 展开、9 列 schema、zero-child、缺失字段、无 child API、counts、fallback、
+  MTT/DSS/WORKFLOW-get-task 回归：fake 测试 A–O 覆盖。
+- 真实字段级验证建议按 Runbook 用 `TF_DI_JPN_GDM_BI_DWH_AYU_M_JGI_MST` 跑一次。
+
+*相关提交：本次（`feat: expand workflow child tasks in export`），含 ALL 分表实现（Li 已确认）。*

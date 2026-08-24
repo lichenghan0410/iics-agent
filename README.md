@@ -371,6 +371,26 @@ Excel は 2 つの sheet を含みます（旧 `Field Mapping` / `Truncation Ris
 | Export Errors | エラー / 警告記録：主詳細の失敗は `error`、enrichment（mapping/runtime/connection）失敗は `warning`。どちらも無ければ 1 行 `No export errors`。 |
 
 > フォルダには数千の task が存在し得ます。`--details` は task ごとに詳細を 1 回ずつ呼ぶため大きなフォルダでは時間がかかります。素早く一覧だけ見たい場合は `--summary-only`。
+>
+> 上表は DSS / MTT / `--type ALL` の共通列です。**`--type WORKFLOW` は専用の 9 列 schema を使います（下記）。**
+
+#### `--type WORKFLOW` の出力（child task 展開）
+
+```powershell
+python .\iics_cli.py export JAPAN_SCRM_DI --type WORKFLOW --format excel
+```
+
+WORKFLOW の `Task Summary` は**専用 9 列**：`Task Type, folder, orgId, id, Task Name, updateTime, tasks.taskId, tasks.type, tasks.name`。
+
+**各 workflow の `tasks[]` child が 1 行ずつ**展開され、親フィールド（`Task Type` / `folder` / `orgId` / `id` / `Task Name` / `updateTime`）は各行に繰り返し、child フィールド（`tasks.taskId` / `tasks.type` / `tasks.name`）を個別表示します。例：
+
+```text
+1 workflow + 2 child task → Excel 2 行（親フィールドは 2 行とも同一）
+```
+
+child task が無い workflow も 1 行残します（child 3 列は空）。`folder` はコマンドの `<FOLDER>` 由来。WORKFLOW export は child の MTT/DSS 詳細を照会しません。**WORKFLOW `get-task` の出力は不変**（従来のフラット detail）。
+
+> `--type ALL` の出力では、共通 `Task Summary`（DSS + MTT）に加えて **`Workflow Tasks`** sheet（WORKFLOW の 9 列 child 展開）を追加生成します。WORKFLOW が無い場合はこの sheet を生成しません。
 
 ### 安定性と出力判定
 

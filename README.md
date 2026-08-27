@@ -275,7 +275,7 @@ python iics_cli.py get-task DI_FACT_SALES_DAILY DSS --folder JAPAN_SCRM_DI
 }
 ```
 
-> **重要な制約**：`runtime_environment.name` は DSS 種別では常に空です。IICS API の DSS 詳細エンドポイント自体が runtime environment フィールドを返さないためで、プラットフォームのデータ可得性の制約であり、ツールのバグではありません。
+> **DSS `get-task` は既定で compact**（DSS Excel 11 列と一致）：`{task_count:1, rows:1, records:[{11 項目}]}` を返します。`--full` で上記の完全 detail を返します（上の JSON は `--full` の形）。`runtime_environment.name` は DSS では常に空（DSS 詳細 API が返さない、プラットフォーム制約でバグではない）。
 >
 > **MTT 詳細は増強済み**：MTT は公式 FRS 経路を使い、DSS/WORKFLOW と異なる構造を返します——トップレベルに `id`（classic V2 ID）、`federated_id`（V3/FRS ID）、`detail_route`、`runtime_environment{id,name}`、`task_mapping{id,name,location,updated_on}`（`location` は現状空）、`transformations[]`（MTT parameters のみ由来）、`enrichment_warnings[]`。
 >
@@ -365,14 +365,17 @@ python iics_cli.py export JAPAN_COMMERCIAL_DWH --type DSS
 
 Excel は 2 つの sheet を含みます（旧 `Field Mapping` / `Truncation Risk` は削除）：
 
-| Sheet | 説明 |
-|-------|------|
-| Task Summary | 業務データ主 sheet、22 列（`@type, id, orgId, Task Name, Task Type, Task Location, Runtime Environment, Task Updated On, Mapping Name, Mapping Updated On, Transformation Name, Source Connection, Source Object, Custom Query, Target Connection, Operation, Target Object, Parameter File Directory, Parameter File Name, Pre-Processing Commands, Post-Processing Commands, Status`）。**DSS / WORKFLOW：1 task = 1 行；MTT：各 Source/Target transformation = 1 行**（タスク級フィールドは各行に繰り返し）。MTT 専用列は DSS/WORKFLOW では空。複数 source object は同一セル内で改行表示。（`Mapping Location` は API に信頼できる取得元がなく常に空のため削除。） |
-| Export Errors | エラー / 警告記録：主詳細の失敗は `error`、enrichment（mapping/runtime/connection）失敗は `warning`。どちらも無ければ 1 行 `No export errors`。 |
+**task 種別ごとに専用 schema を使用**（共通列は廃止）：
+
+| 種別 | 列数 | 行モデル | 列 |
+|------|-----:|--------|----|
+| **DSS** | 11 | 1 task = 1 行 | `@type, id, orgId, Task Name, Task Type, Task Updated On, Source Connection, Source Object, Operation, Target Connection, Target Object` |
+| **MTT** | 22 | 各 Source/Target transformation = 1 行 | `@type, id, orgId, Task Name, Task Type, Task Location, Runtime Environment, Task Updated On, Mapping Name, Mapping Updated On, Transformation Name, Source Connection, Source Object, Custom Query, Target Connection, Operation, Target Object, Parameter File Directory, Parameter File Name, Pre-Processing Commands, Post-Processing Commands, Status` |
+| **WORKFLOW** | 9 | 各 `tasks[]` child = 1 行 | `Task Type, folder, orgId, id, Task Name, updateTime, tasks.taskId, tasks.type, tasks.name` |
+
+単一種別の出力（`--type DSS` / `--type MTT` / `--type WORKFLOW`）は業務 sheet 名が `Task Summary`、加えて `Export Errors`（エラー/警告、両方無ければ 1 行 `No export errors`）。DSS の `Source Object` は `sourceObjects[0].name` のみ（単値、展開しない）。
 
 > フォルダには数千の task が存在し得ます。`--details` は task ごとに詳細を 1 回ずつ呼ぶため大きなフォルダでは時間がかかります。素早く一覧だけ見たい場合は `--summary-only`。
->
-> 上表は DSS / MTT / `--type ALL` の共通列です。**`--type WORKFLOW` は専用の 9 列 schema を使います（下記）。**
 
 #### `--type WORKFLOW` の出力（child task 展開）
 
@@ -390,7 +393,7 @@ WORKFLOW の `Task Summary` は**専用 9 列**：`Task Type, folder, orgId, id,
 
 child task が無い workflow も 1 行残します（child 3 列は空）。`folder` はコマンドの `<FOLDER>` 由来。WORKFLOW export は child の MTT/DSS 詳細を照会しません。**WORKFLOW `get-task` の出力は不変**（従来のフラット detail）。
 
-> `--type ALL` の出力では、共通 `Task Summary`（DSS + MTT）に加えて **`Workflow Tasks`** sheet（WORKFLOW の 9 列 child 展開）を追加生成します。WORKFLOW が無い場合はこの sheet を生成しません。
+> `--type ALL` の出力は 3 つの独立業務 sheet（固定順）：**`MTT Task`（22 列）→ `DSS Tasks`（11 列）→ `Workflow Tasks`（9 列）**、加えて `Export Errors`。各種別が自分の schema を使い、DSS は MTT と同表になりません。
 
 ### 4b. `export-selected` — 指定した Task List のみ出力
 
@@ -484,7 +487,7 @@ python smoke_test.py
 - **同名 task をフォルダ間で確実に区別できない**：必ず `--folder` を付けてください。
 - **MTT / WORKFLOW の runtime / connection フィールド構造は未検証**：v0.1 は主に DSS で完全なフィールド検証を実施。
 - **Token は自動更新されない**：失効後はブラウザから手動で再取得が必要。
-- **Excel は `Task Summary`（22 列）+ `Export Errors` の 2 sheet を出力**（旧 `Field Mapping` / `Truncation Risk` は削除；`Mapping Location` は常に空のため削除）。MTT は transformation 単位で複数行に展開され、`task_count` と `rows` は分離。
+- **Excel は種別ごとに専用 schema**：DSS 11 列 / MTT 22 列 / WORKFLOW 9 列 + `Export Errors`；`--type ALL` は `MTT Task` / `DSS Tasks` / `Workflow Tasks` の 3 業務 sheet。MTT/WORKFLOW は複数行に展開され、`task_count` と `rows` は分離。
 
 ---
 

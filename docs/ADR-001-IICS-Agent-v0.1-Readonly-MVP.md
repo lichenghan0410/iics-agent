@@ -977,9 +977,10 @@ API 契约（V3 端点、`skip` 分页、小写 `and`、V2 by-name 均不变）�
 transformations 等）、`export_results` 契约（task_count/rows 分离、双 sheet）、Smoke Test 4、
 D-4/export 流程、Amendment 2 中 `id（federated）/id_type` 的描述均标注被本 Amendment 修正。
 
-### Task Summary 列（**Amendment 4 修正为 22 列**，DSS/WORKFLOW 共用，MTT 专属列留空）
+### Task Summary 列（22 列；**Amendment 7 起为 MTT 专属 `MTT_HEADERS`**）
 
-> 原 23 列含 `Mapping Location`，已被 Amendment 4 删除（始终为空、无业务价值）。
+> Amendment 4 曾为 DSS/MTT 共用；**Amendment 7 起 DSS 拆出独立 11 列 `DSS_HEADERS`**，此 22 列
+> 仅用于 MTT。原 23 列含 `Mapping Location`，已被 Amendment 4 删除（始终为空、无业务价值）。
 
 `@type, id, orgId, Task Name, Task Type, Task Location, Runtime Environment, Task Updated On,
 Mapping Name, Mapping Updated On, Transformation Name, Source Connection,
@@ -1082,6 +1083,9 @@ Amendment 3/4 正文「DSS / WORKFLOW：1 task = 1 行」仅适用于**通用列
 
 - **`Task Summary`**（通用 22 列）：DSS + MTT 行；**ALL 下 WORKFLOW 不进此表**。
 - **`Workflow Tasks`**（WORKFLOW 专用 9 列，child 展开）：ALL 中的 WORKFLOW 记录；无 WORKFLOW 时不生成。
+
+> **⚠️ 已被 Amendment 7 supersede**：ALL 现改为三张独立业务 sheet
+> `MTT Task`(22) → `DSS Tasks`(11) → `Workflow Tasks`(9) → `Export Errors`（DSS 不再与 MTT 同表）。
 - **`Export Errors`**：不变。
 - `rows` = 两张业务表物理数据行数之和；`task_count == list_tasks.count`。
 
@@ -1148,4 +1152,61 @@ Amendment 3/4 正文「DSS / WORKFLOW：1 task = 1 行」仅适用于**通用列
   现有 export/get-task/ALL 无回归：fake 测试 A–X + U-1 + CLL 覆盖。
 - 本 feature **未解决** DSS/WORKFLOW org 级同名 ambiguity（by-name 固有风险，summary warning 提示）。
 
-*相关提交：本次（`feat: add selected task list export`）。*
+*相关提交：`1aaff25`（`feat: add selected task list export`）。*
+
+---
+
+## Amendment 7 — DSS Dedicated Export Schema
+
+**性质**：export/schema + CLI presentation change，**不改查询层**。不新增 API、不新增写操作、
+不改 DSS detail route。
+
+### 变更点
+
+1. **DSS 脱离 MTT 22 列 schema，使用独立 11 列**（顺序固定）：
+   `@type, id, orgId, Task Name, Task Type, Task Updated On, Source Connection,
+   Source Object, Operation, Target Connection, Target Object`。
+   来源：`raw["@type"/"id"/"orgId"/"updateTime"/"operation"/"targetObject"]`、`Task Name`=detail
+   name、`Task Type`=固定 `"DSS"`、Source/Target Connection=现有 `detail["source_connection"/
+   "target_connection"]`（已解析 name）、`Source Object`=`raw["sourceObjects"][0]["name"]`。
+   **不显示** Task Location / Runtime Environment / Mapping* / Transformation Name / Custom Query /
+   Parameter File* / Pre-/Post-Processing / Status。
+2. **MTT 22 列正式收窄为 MTT 专属**：常量 `_COLS` 更名 `MTT_HEADERS`（`_COLS` 保留为内部私有别名）。
+3. **DSS `1 task = 1 row`**：`build_dss_summary_rows()`，`len==1`；不做 MTT 式 transformation 展开。
+4. **`sourceObjects[]` 只取第一项** `sourceObjects[0].name`（产品决策）；有第二项及后续 → 忽略、
+   不告警、不展开、不多值。缺失/空/非 dict/无 name → `""`。
+5. **`export --type DSS`**：`Task Summary` 恰 11 列（`1 task = 1 row`，DSS-only 时 `rows==task_count`
+   为自然结果，**不**作为通用完整性契约）。
+6. **`export --type ALL` 改为三个独立业务 sheet（固定顺序）**：`MTT Task`(22) → `DSS Tasks`(11) →
+   `Workflow Tasks`(9) → `Export Errors`。DSS 不再与 MTT 同表；无 union、无空列膨胀。
+   `rows` = 三张业务表物理行数之和。**（supersede Amendment 5 的「Task Summary(DSS+MTT) + Workflow
+   Tasks」ALL 结构。）**
+7. **`get-task <name> DSS` 默认 compact**：`{task_count:1, rows:1, records:[{…11 字段}]}`，record keys
+   恰 == `DSS_HEADERS`；`--full` 输出完整 normalized detail（不变）。CLI 与 Excel 共用
+   `build_dss_summary_rows()`；`compact_record(row, columns=…)` 泛化（MTT 默认，DSS 传 DSS_HEADERS）。
+   WORKFLOW get-task 保持不变。返回结构因 task type 而异（MTT/DSS→records、WORKFLOW→扁平 dict）。
+8. **`export-selected` 自动继承**：`selected_exporter` 仍 `export_results(export_type="DSS")`，
+   `selected_DSS_*.xlsx` 自动用 11 列；MTT/WORKFLOW schema 与 selection/dedup/ambiguity/discovery/
+   summary/cache 契约**不变**（selected_exporter.py 无业务改动）。
+
+### 对正文旧契约的反向修正
+
+- 「22-column Task Summary」不再是 DSS/MTT 共用；**DSS = 11 列（Amendment 7）、MTT = 22 列
+  (MTT_HEADERS)**。正文相应处已标注 supersede。
+- Amendment 4「DSS / WORKFLOW：1 task = 1 行 … 通用列」中的 DSS 部分被本 Amendment 修正为独立 11 列
+  （仍 1 task = 1 row）；MTT 22 列部分不变。
+- Amendment 5 ALL 结构（`Task Summary`(DSS+MTT) + `Workflow Tasks`）被本 Amendment 的三表结构替代。
+
+### 未改动（回归保证）
+
+DSS route `dsstask/name/{name}`、MTT FRS 路由、WORKFLOW `workflow/name/{name}`、
+`query.py` normalized contract、`selected_exporter.py` 编排、MTT 22 列 / WORKFLOW 9 列、
+MTT/WORKFLOW 行展开与 count 语义、单类型 MTT/WORKFLOW 的 sheet 名 `Task Summary`——全部不变。
+
+### 已验证
+
+fake 测试 A–R：DSS 11 列/顺序、正常行、sourceObjects 空/缺失/多值(取首)、可选字段、connection
+dict 复用、DSS-only workbook、MTT/WORKFLOW 单类型回归、ALL 三表结构+schema、ALL rows 求和、
+DSS compact/full、MTT/WORKFLOW get-task 回归、selected DSS 11 列、connection 失败保留行。
+
+*相关提交：本次（`feat: add dedicated DSS export schema`）。*

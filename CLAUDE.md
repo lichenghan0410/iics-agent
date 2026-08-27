@@ -64,8 +64,8 @@ python iics_cli.py export-selected --input <selected_tasks.json> --output-dir <d
   fallback `parameter.label`（label 可能只是 connection display label，不能作第一优先级）。
 - **`get-task MTT` 默认 compact output**（Task Summary 同款业务字段 records）；`--full` 才展示完整
   normalized detail（诊断用）。DSS/WORKFLOW 保持扁平 dict、不受影响。`get_task_detail()` 返回值不变。
-- Excel：`Task Summary`（**Amendment 4 起 22 列**，删除 Mapping Location）+ `Export Errors` 两个 sheet；
-  **不得新增 MTT 专属 sheet**；MTT 每个 transformation 一行。
+- Excel：MTT 专属 `MTT_HEADERS`（22 列，Amendment 7 起不再与 DSS 共用）+ `Export Errors`；
+  MTT 每个 transformation 一行。
 - 计数：`task_count`（==list_tasks.count）与 `rows`（物理行数）**分离**；完整成功=task_count 一致
   且 failed_details_count==0；**不得**用 `rows==task_count` 判断。
 - enrichment（mapping/runtime/connection）失败 → `enrichment_warnings`，**不**计入 `failed_details`、不终止导出。
@@ -85,8 +85,17 @@ python iics_cli.py export-selected --input <selected_tasks.json> --output-dir <d
   tasks.taskId, tasks.type, tasks.name`（含 `folder`，取自 export 的 `<FOLDER>`）。父字段逐行重复。
 - 无 child 的 workflow 仍保留 1 行；detail 失败保留 1 fallback 行并计入 `rows`（按 `max(1,len)`）。
 - WORKFLOW `get-task` 输出不变。
-- `--type WORKFLOW` 单类型：单张 9 列 `Task Summary`。**`--type ALL`：通用 `Task Summary`（DSS+MTT）
-  + 单独 `Workflow Tasks`（9 列 child 展开）+ `Export Errors`**（Li 已确认分表方案）。
+- `--type WORKFLOW` 单类型：单张 9 列 `Task Summary`。
+- **`--type ALL`（Amendment 7）：三张独立业务 sheet，固定顺序 `MTT Task`(22) → `DSS Tasks`(11)
+  → `Workflow Tasks`(9) → `Export Errors`**（DSS 不再与 MTT 同表）。
+
+## DSS export 规则（Amendment 7）
+
+- DSS 用独立 **11 列** `DSS_HEADERS`（`@type, id, orgId, Task Name, Task Type, Task Updated On,
+  Source Connection, Source Object, Operation, Target Connection, Target Object`）；**1 task = 1 行**。
+- `Source Object` **只取 `sourceObjects[0].name`**（单值，不多值展开、不告警）。
+- DSS detail route **仍 `dsstask/name/{name}`**，不新增 API、不用 federated id。
+- `get-task <name> DSS` 默认 compact（records=DSS_HEADERS）；`--full` 完整 detail。
 
 ## Selected Task Export（Amendment 6）
 

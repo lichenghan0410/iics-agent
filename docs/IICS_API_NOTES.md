@@ -182,7 +182,12 @@ sourceConnectionId, targetConnectionId   # ✅ 可稳定抽取
 `srcRuntimeAttrs` / `tgtRuntimeAttrs`，实测为空 `{"attrs": {}}`。
 
 **结论**：`get_task_detail()` 的 `runtime_environment.name`（Amendment 3 前称 `runtime_agent`）
-对 DSS **恒为空**（best-effort，不报错）。这是 API 数据可得性限制，非缺陷。
+对 DSS **恒为空**（best-effort，不报错）。
+
+**DSS `sourceObjects`（Amendment 7 展示规则）**：DSS raw 中 `sourceObjects` 为**数组**。本项目
+DSS 11 列导出的 `Source Object` **只取 `sourceObjects[0].name`**（单值）。这是**项目展示决策**
+（DSS 业务模型按单值处理），**不是**声称该 API 永远只存在一个 source object；如出现第二个及后续
+元素，展示层忽略、不告警、不展开（未扩大实测结论）。这是 API 数据可得性限制，非缺陷。
 
 ### 7.2 MTT enrichment 端点（Amendment 3）
 

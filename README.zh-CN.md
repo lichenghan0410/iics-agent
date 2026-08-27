@@ -275,7 +275,7 @@ python iics_cli.py get-task DI_FACT_SALES_DAILY DSS --folder JAPAN_SCRM_DI
 }
 ```
 
-> **重要限制**：`runtime_environment.name` 对 DSS 类型恒为空——IICS API 的 DSS 详情接口本身不返回 runtime environment 字段，这是平台数据可得性限制，不是工具的 bug。
+> **DSS `get-task` 默认 compact**（与 DSS Excel 11 列一致）：返回 `{task_count:1, rows:1, records:[{11 字段}]}`；`--full` 才返回上面的完整 detail。上方 JSON 是 `--full` 的形态。`runtime_environment.name` 对 DSS 恒为空（DSS 详情接口不返回该字段，平台限制，非 bug）。
 >
 > **MTT 详情已增强**：MTT 走官方 FRS 路径，返回结构与 DSS/WORKFLOW 不同——顶层含 `id`（classic V2 ID）、`federated_id`（V3/FRS ID）、`detail_route`、`runtime_environment{id,name}`、`task_mapping{id,name,location,updated_on}`（`location` 当前为空）、`transformations[]`（仅来自 MTT parameters）、`enrichment_warnings[]`。
 >
@@ -365,14 +365,17 @@ python iics_cli.py export JAPAN_COMMERCIAL_DWH --type DSS
 
 Excel 含 2 个 sheet（原 `Field Mapping` / `Truncation Risk` 已移除）：
 
-| Sheet | 说明 |
-|-------|------|
-| Task Summary | 业务数据主 sheet，共 22 列（`@type, id, orgId, Task Name, Task Type, Task Location, Runtime Environment, Task Updated On, Mapping Name, Mapping Updated On, Transformation Name, Source Connection, Source Object, Custom Query, Target Connection, Operation, Target Object, Parameter File Directory, Parameter File Name, Pre-Processing Commands, Post-Processing Commands, Status`）。**DSS / WORKFLOW：1 task = 1 行；MTT：每个 Source/Target transformation = 1 行**（任务级字段每行重复），MTT 专属列对 DSS/WORKFLOW 留空。多个 source object 在同一单元格换行显示。（`Mapping Location` 因 API 无可靠来源、始终为空，已删除。） |
-| Export Errors | 错误 / 警告记录：主详情失败记为 `error`，enrichment（mapping/runtime/connection）失败记为 `warning`；都没有时写单行 `No export errors`。 |
+**每种 task 类型使用独立的专用 schema**（不再共用一套列）：
+
+| 类型 | 列数 | 行模型 | 列 |
+|------|-----:|--------|----|
+| **DSS** | 11 | 1 task = 1 行 | `@type, id, orgId, Task Name, Task Type, Task Updated On, Source Connection, Source Object, Operation, Target Connection, Target Object` |
+| **MTT** | 22 | 每个 Source/Target transformation = 1 行 | `@type, id, orgId, Task Name, Task Type, Task Location, Runtime Environment, Task Updated On, Mapping Name, Mapping Updated On, Transformation Name, Source Connection, Source Object, Custom Query, Target Connection, Operation, Target Object, Parameter File Directory, Parameter File Name, Pre-Processing Commands, Post-Processing Commands, Status` |
+| **WORKFLOW** | 9 | 每个 `tasks[]` child = 1 行 | `Task Type, folder, orgId, id, Task Name, updateTime, tasks.taskId, tasks.type, tasks.name` |
+
+单类型导出（`--type DSS` / `--type MTT` / `--type WORKFLOW`）业务 sheet 名均为 `Task Summary`，配合 `Export Errors`（错误/警告记录，都没有时写单行 `No export errors`）。DSS 的 `Source Object` 只取 `sourceObjects[0].name`（单值，不展开）。
 
 > 一个文件夹可能有上千个 task，`--details` 模式会对每个 task 单独调用一次详情接口，文件夹大时会比较慢。快速预览用 `--summary-only`。
->
-> 上表为 DSS / MTT / `--type ALL` 的通用列。**`--type WORKFLOW` 使用独立的 9 列 schema，见下。**
 
 #### `--type WORKFLOW` 导出（child task 展开）
 
@@ -390,7 +393,7 @@ WORKFLOW 的 `Task Summary` 使用**专用 9 列**：`Task Type, folder, orgId, 
 
 无 child task 的 workflow 仍占 1 行（child 三列留空）。`folder` 取自命令行的 `<FOLDER>`。WORKFLOW export 不查询 child 的 MTT/DSS 详情。**WORKFLOW `get-task` 输出不变**（仍为完整扁平 detail）。
 
-> `--type ALL` 导出时：通用 `Task Summary`（DSS + MTT）之外，额外生成一张 **`Workflow Tasks`** sheet（WORKFLOW 的 9 列 child 展开）；没有 WORKFLOW 时不生成该 sheet。
+> `--type ALL` 导出时生成三张独立业务 sheet（固定顺序）：**`MTT Task`（22 列）→ `DSS Tasks`（11 列）→ `Workflow Tasks`（9 列）**，再加 `Export Errors`。三类各用自己的 schema，DSS 不再与 MTT 同表。
 
 ### 4b. `export-selected` — 只导出指定 Task List
 
@@ -484,7 +487,7 @@ python smoke_test.py
 - **同名 task 跨文件夹无法可靠区分**：务必带 `--folder`。
 - **MTT / WORKFLOW 的 runtime / connection 字段结构未深度验证**：v0.1 主要在 DSS 上做了完整字段验证。
 - **Token 不会自动刷新**：过期后需要重新从浏览器手动获取。
-- **Excel 导出 `Task Summary`（22 列）+ `Export Errors` 两个 sheet**（原 `Field Mapping` / `Truncation Risk` 已移除；`Mapping Location` 因始终为空已删除）；MTT 按 transformation 展开成多行，`task_count` 与 `rows` 分离。
+- **Excel 每类型独立 schema**：DSS 11 列、MTT 22 列、WORKFLOW 9 列 + `Export Errors`；`--type ALL` 输出 `MTT Task` / `DSS Tasks` / `Workflow Tasks` 三张业务表。MTT/WORKFLOW 可展开多行，`task_count` 与 `rows` 分离。
 
 ---
 

@@ -368,6 +368,38 @@ python .\iics_cli.py export-selected --input .\selected_tasks.json --output-dir 
       regression 为主）。
 - [ ] summary 不含完整 detail / raw；个别失败不中断整批；输入 JSON 非法才整体 exit 1。
 
+### 6.7 DSS 独立 11 列 schema（Amendment 7）
+
+DSS-only 导出：
+
+```powershell
+python .\iics_cli.py export JAPAN_SCRM_DI --type DSS --format excel
+```
+
+- [ ] `Task Summary` header 恰为 **11 列**（`@type, id, orgId, Task Name, Task Type,
+      Task Updated On, Source Connection, Source Object, Operation, Target Connection, Target Object`）。
+- [ ] `1 DSS task = 1 行`（DSS-only 时 rows == task_count 为自然结果）。
+- [ ] `Source Object` 只取 `sourceObjects[0].name`（多个只显示第一个，不展开、不告警）。
+
+DSS get-task：
+
+```powershell
+python .\iics_cli.py get-task <NAME> DSS --folder <FOLDER>          # 默认 compact
+python .\iics_cli.py get-task <NAME> DSS --folder <FOLDER> --full   # 完整 detail
+```
+
+- [ ] 默认：`task_count==1`、`rows==1`、`len(records)==1`、record keys == 11 列 DSS_HEADERS。
+- [ ] `--full`：仍返回完整 normalized detail（`raw` / `source_connection` / `target_connection` 等）。
+
+`--type ALL`：
+
+- [ ] 业务 sheet 顺序恰为 **`MTT Task`（22）→ `DSS Tasks`（11）→ `Workflow Tasks`（9）**，再 `Export Errors`。
+- [ ] DSS 行只出现在 `DSS Tasks`，不进 `MTT Task`。
+
+`export-selected`：
+
+- [ ] `selected_DSS_*.xlsx` 使用 11 列 DSS schema（selection/count/summary 契约不变）。
+
 ---
 
 ## 7. 常见失败与排查

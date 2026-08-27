@@ -21,8 +21,8 @@ from pathlib import Path
 from openpyxl import Workbook
 from openpyxl.styles import Alignment
 
-# Task Summary 列顺序（Amendment 4：22 列，删除始终为空的 Mapping Location）
-_COLS = [
+# MTT 专属 Task Summary 列（Amendment 4：22 列；Amendment 7 起正式收窄为 MTT 专属）
+MTT_HEADERS = [
     "@type", "id", "orgId",
     "Task Name", "Task Type", "Task Location", "Runtime Environment",
     "Task Updated On",
@@ -33,7 +33,16 @@ _COLS = [
     "Pre-Processing Commands", "Post-Processing Commands",
     "Status",
 ]
-_SOURCE_OBJECT_COL = _COLS.index("Source Object")  # 0-based；用于 wrap text
+_COLS = MTT_HEADERS  # 内部私有别名（过渡）；对外/跨文件一律用 MTT_HEADERS
+_SOURCE_OBJECT_COL = MTT_HEADERS.index("Source Object")  # 0-based；用于 wrap text
+
+# DSS 专属 Task Summary 列（Amendment 7：独立 11 列，1 task = 1 row）
+DSS_HEADERS = [
+    "@type", "id", "orgId",
+    "Task Name", "Task Type", "Task Updated On",
+    "Source Connection", "Source Object", "Operation",
+    "Target Connection", "Target Object",
+]
 
 _EXPORT_ERROR_HEADERS = ["level", "task_name", "task_type", "folder", "error_type", "error"]
 
@@ -145,7 +154,7 @@ def _task_level_row(rec: dict, top_folder: str) -> dict:
     pf = rec.get("parameter_file") or {}
     ao = rec.get("advanced_options") or {}
 
-    row = {c: "" for c in _COLS}
+    row = {c: "" for c in MTT_HEADERS}
     row["@type"] = rec.get("@type", "")
     row["id"] = rec.get("id", "")
     row["orgId"] = rec.get("orgId", "")
@@ -248,6 +257,43 @@ def build_workflow_summary_rows(rec: dict, folder_path: str) -> list:
     return out
 
 
+def _dss_source_object(raw: dict) -> str:
+    """DSS Source Object：只取 sourceObjects[0].name（产品决策，不做多值展开、不告警）。"""
+    if not isinstance(raw, dict):
+        return ""
+    so = raw.get("sourceObjects")
+    if not isinstance(so, list) or not so:
+        return ""
+    first = so[0]
+    if not isinstance(first, dict):
+        return ""
+    name = first.get("name")
+    return name if isinstance(name, str) else ("" if name is None else str(name))
+
+
+def build_dss_summary_rows(rec: dict, folder_path: str = "") -> list:
+    """DSS 记录 → 恰 1 行（11 列 dict）。CLI compact 与 Excel 共用此 row builder。
+
+    folder_path 仅为统一接口保留；DSS 11 列不输出 folder。Source/Target Connection 直接复用
+    detail 中已解析好的 name（不在此发 API）；raw 字段缺失 best-effort 空值。
+    """
+    raw = rec.get("raw") if isinstance(rec.get("raw"), dict) else {}
+    row = {
+        "@type": raw.get("@type", ""),
+        "id": raw.get("id", ""),
+        "orgId": raw.get("orgId", ""),
+        "Task Name": rec.get("name") or rec.get("task_name") or raw.get("name", ""),
+        "Task Type": "DSS",
+        "Task Updated On": raw.get("updateTime", ""),
+        "Source Connection": _conn_display(rec.get("source_connection")),
+        "Source Object": _dss_source_object(raw),
+        "Operation": raw.get("operation", ""),
+        "Target Connection": _conn_display(rec.get("target_connection")),
+        "Target Object": raw.get("targetObject", ""),
+    }
+    return [row]
+
+
 def _build_rows(data: dict) -> list:
     details = data.get("details")
     top_folder = data.get("folder", "")
@@ -277,13 +323,18 @@ def _cell(v):
     return v
 
 
-# 供 CLI compact get-task 使用：与 Excel 完全相同的列名与单元格值
-TASK_SUMMARY_COLUMNS = list(_COLS)
+# 供 CLI compact get-task 使用：与 Excel 完全相同的列名与单元格值（默认 MTT 22 列）
+TASK_SUMMARY_COLUMNS = list(MTT_HEADERS)
 
 
-def compact_record(row: dict) -> dict:
-    """把 row builder 产出的行 dict 归一化为 compact record（值 == Excel 单元格值）。"""
-    return {c: _cell(row.get(c)) for c in _COLS}
+def compact_record(row: dict, columns=None) -> dict:
+    """行 dict → compact record（值 == Excel 单元格值）。
+
+    columns 默认为 MTT_HEADERS（MTT compact 行为不变）；DSS compact 传 DSS_HEADERS。
+    输出字段顺序严格由 columns 决定，不泄露 columns 之外字段。
+    """
+    cols = columns if columns is not None else MTT_HEADERS
+    return {c: _cell(row.get(c)) for c in cols}
 
 
 def _collect_enrichment_warnings(data: dict) -> list:
@@ -339,13 +390,25 @@ def export_results(
         records = [r for r in records if isinstance(r, dict)]
         top_folder = data.get("folder", "")
 
+        def _is_mtt(rec):
+            return rec.get("type") == "MTT" or rec.get("task_type") == "MTT"
+
         def _is_wf(rec):
             return rec.get("type") == "WORKFLOW" or rec.get("task_type") == "WORKFLOW"
 
-        def _generic_rows(recs):
+        def _is_dss(rec):
+            return rec.get("type") == "DSS" or rec.get("task_type") == "DSS"
+
+        def _mtt_rows(recs):
             out = []
             for rec in recs:
                 out.extend(build_task_summary_rows(rec, top_folder))
+            return out
+
+        def _dss_rows(recs):
+            out = []
+            for rec in recs:
+                out.extend(build_dss_summary_rows(rec, top_folder))
             return out
 
         def _wf_rows(recs):
@@ -357,16 +420,22 @@ def export_results(
         # business_sheets: [(sheet_title, headers, rows)]
         if export_type == "WORKFLOW":
             business_sheets = [("Task Summary", WORKFLOW_HEADERS, _wf_rows(records))]
+        elif export_type == "DSS":
+            business_sheets = [("Task Summary", DSS_HEADERS, _dss_rows(records))]
         elif export_type == "ALL":
-            # ALL：通用 Task Summary（DSS+MTT）+ 单独 Workflow Tasks（9 列 child 展开）
+            # ALL（Amendment 7）：三个独立业务 sheet，固定顺序
+            # MTT Task(22) → DSS Tasks(11) → Workflow Tasks(9)，再 Export Errors
+            mtt_recs = [r for r in records if _is_mtt(r)]
+            dss_recs = [r for r in records if _is_dss(r)]
             wf_recs = [r for r in records if _is_wf(r)]
-            other = [r for r in records if not _is_wf(r)]
-            business_sheets = [("Task Summary", _COLS, _generic_rows(other))]
-            if wf_recs:
-                business_sheets.append(
-                    ("Workflow Tasks", WORKFLOW_HEADERS, _wf_rows(wf_recs)))
+            business_sheets = [
+                ("MTT Task", MTT_HEADERS, _mtt_rows(mtt_recs)),
+                ("DSS Tasks", DSS_HEADERS, _dss_rows(dss_recs)),
+                ("Workflow Tasks", WORKFLOW_HEADERS, _wf_rows(wf_recs)),
+            ]
         else:
-            business_sheets = [("Task Summary", _COLS, _generic_rows(records))]
+            # MTT 单类型 / 其它：MTT 22 列
+            business_sheets = [("Task Summary", MTT_HEADERS, _mtt_rows(records))]
 
         rows = sum(len(rws) for _, _, rws in business_sheets)
         task_count = len(data.get("tasks") or [])
@@ -387,7 +456,7 @@ def export_results(
                 ws = wb.active if idx == 0 else wb.create_sheet(title)
                 ws.title = title
                 ws.append(headers)
-                is_generic = headers is _COLS
+                is_generic = headers is MTT_HEADERS
                 for r in rws:
                     ws.append([_cell(r.get(c)) for c in headers])
                     if is_generic:

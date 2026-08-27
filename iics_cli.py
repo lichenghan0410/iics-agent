@@ -30,7 +30,8 @@ from pathlib import Path
 
 from iics_client import SessionManager, IICSClient
 from tools.query import list_tasks, get_task_detail, resolve_connection
-from tools.exporter import export_results, build_task_summary_rows, compact_record
+from tools.exporter import (export_results, build_task_summary_rows,
+                            build_dss_summary_rows, compact_record, DSS_HEADERS)
 from tools.selected_exporter import validate_selected_tasks, export_selected_tasks
 
 
@@ -78,8 +79,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_get.add_argument(
         "--full", action="store_true",
-        help="MTT：输出完整 normalized detail（诊断用，只读，不涉及写操作）；"
-             "默认输出 Task Summary 同款业务字段（compact records）",
+        help="MTT / DSS：输出完整 normalized detail（诊断用，只读，不涉及写操作）；"
+             "默认输出对应 schema 的 compact records。WORKFLOW 始终为扁平 detail，"
+             "不同 task type 返回结构不同",
     )
     p_get.add_argument("--no-resolve", action="store_true")
 
@@ -130,12 +132,17 @@ def _cmd_get_task(client, args) -> dict:
     )
     if isinstance(detail, dict) and "error" in detail:
         return detail
-    # MTT 默认输出 compact records（与 Excel Task Summary 一致）；--full 输出完整 detail。
-    # DSS / WORKFLOW 保持现状（扁平 dict），--full 不改变其行为。
-    if args.type == "MTT" and not getattr(args, "full", False):
-        rows = build_task_summary_rows(detail, args.folder)
-        records = [compact_record(r) for r in rows]
-        return {"task_count": 1, "rows": len(records), "records": records}
+    # MTT / DSS 默认输出 compact records（与对应 Excel schema 一致）；--full 输出完整 detail。
+    # WORKFLOW 保持现状（扁平 dict）。返回结构因 task_type 而异，脚本调用先判 task_type。
+    if not getattr(args, "full", False):
+        if args.type == "MTT":
+            rows = build_task_summary_rows(detail, args.folder)
+            records = [compact_record(r) for r in rows]
+            return {"task_count": 1, "rows": len(records), "records": records}
+        if args.type == "DSS":
+            rows = build_dss_summary_rows(detail, args.folder)
+            records = [compact_record(r, DSS_HEADERS) for r in rows]
+            return {"task_count": 1, "rows": len(records), "records": records}
     return detail
 
 

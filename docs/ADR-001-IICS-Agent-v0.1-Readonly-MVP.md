@@ -45,7 +45,7 @@ v0.1 的唯一目标是：**让运维人员能用自然语言查询 IICS task �
 | D-2 | 认证架构 | `SessionManager` 双模式封装，v0.1 只启用 SSO Cookie 模式 |
 | D-3 | URL 构建 | 工厂函数模式，防止 `/saas/saas/` 路径重复 |
 | D-4 | API 版本混用策略 | V3 枚举 + V2 详情，分别注入不同 Header |
-| D-5 | v0.1 CLI 暴露边界 | 只暴露 4 个只读子命令，write 代码不存在 |
+| D-5 | v0.1 CLI 暴露边界 | 只暴露只读子命令（4 个 + Amendment 6 起新增 export-selected，共 5 个），write 代码不存在 |
 
 ---
 
@@ -231,17 +231,18 @@ IICS 有两套 API，行为差异显著：
 
 ### 决策
 
-**v0.1 `iics_cli.py` 只实现 4 个只读子命令，不出现任何写操作子命令或其底层 import。**
+**v0.1 `iics_cli.py` 只实现只读子命令（4 个 + Amendment 6 的 `export-selected`，共 5 个），不出现任何写操作子命令或其底层 import。**
 
 > Amendment 1 后此例已更新：原决策写于 `iics_agent.py`（Mode B，已移除）尚存在时，示例为 Anthropic tool-use 的 `TOOLS`/`TOOL_MAP` 注册表；Mode B 移除后，v0.1 唯一入口是 `iics_cli.py`（Mode A + Mode C 共用），边界改为子命令级别：
 
 ```python
-# iics_cli.py — v0.1 只实现这 4 个子命令，对应 tools/query.py 与 tools/exporter.py
+# iics_cli.py — v0.1 只读子命令，对应 tools/query.py / exporter.py / selected_exporter.py
 SUBCOMMANDS = {
     "list-tasks":          query.list_tasks,
     "get-task":             query.get_task_detail,
     "resolve-connection":   query.resolve_connection,
-    "export":               exporter.export_results,  # 内部调用 list_tasks + get_task_detail
+    "export":               exporter.export_results,      # 内部调用 list_tasks + get_task_detail
+    "export-selected":      selected_exporter.export_selected_tasks,  # Amendment 6，只读编排
 }
 # 不存在 "update-runtime" / "update-connections" / "batch-update" 等子命令
 ```
@@ -1093,4 +1094,58 @@ Amendment 3/4 正文「DSS / WORKFLOW：1 task = 1 行」仅适用于**通用列
   MTT/DSS/WORKFLOW-get-task 回归：fake 测试 A–O 覆盖。
 - 真实字段级验证建议按 Runbook 用 `TF_DI_JPN_GDM_BI_DWH_AYU_M_JGI_MST` 跑一次。
 
-*相关提交：本次（`feat: expand workflow child tasks in export`），含 ALL 分表实现（Li 已确认）。*
+*相关提交：`17f0333`（`feat: expand workflow child tasks in export`），含 ALL 分表实现（Li 已确认）。*
+
+---
+
+## Amendment 6 — Selected Task List Export
+
+**性质**：v0.1 只读边界内的 integration feature。新增确定性 selected-task **orchestration**
+层，复用现有 DSS/MTT/WORKFLOW 详情、exporter、缓存；不新增写操作、不改现有子命令语义、
+不重新实现任何 parser/exporter/resolver、不改 `--type ALL`。
+
+### 变更点
+
+1. **新增第 5 个只读子命令 `export-selected`**：`--input <json> --output-dir <dir>`。
+   `export <folder> --type X` 仍是「folder 全量」；`export-selected` 是「只导出 list 中指定 task」。
+2. **正式输入只接受 JSON**：top-level array，每项 `{name, type, folder}`（string）。标准化：
+   name/folder `strip()`（**不改大小写**）、type `strip().upper()`。任何 schema/JSON 错误 →
+   **fatal** `SelectedTaskInputError`（**先于任何 IICS 请求**、不生成部分文件、exit 1）。
+3. **exact-tuple 去重**：key = `(type, folder, name)`，保序；报告 `input_count / unique_count /
+   duplicates_removed`。
+4. **DSS / WORKFLOW input-level ambiguity**：list 内同 type+同 name 但不同 folder（by-name 无法
+   消歧）→ 请求前标 `ambiguous_input`、**不调用** by-name detail、两条都计入该 type failed。
+   本版**不做 org 级同名扫描**；只要 list 含 DSS/WORKFLOW，summary warnings 各追加 by-name 风险提示。
+5. **MTT 每 folder 一次 V3 discovery**：按 folder 分组，每 unique folder 只调 `list_tasks(folder, MTT)`
+   **一次**（函数级；folder 内 >200 时内部按 `skip` 分页属正常，见 IICS_API_NOTES §4），建
+   `name → [candidates]` index；0→`selected_task_not_found`、>1→`ambiguous_mtt`（candidates
+   含 id/path/name/type）、1→取 federated id → 现有 FRS detail（`task_id_type="federated"`，
+   **不再** name+folder 二次 discovery）。MTT 跨 folder 同名由此正确区分（非 ambiguous_input）。
+6. **整个 batch 共用一个 `IICSClient`**：Connection/Mapping/Runtime process-local 缓存跨类型复用。
+7. **三个独立 workbook**：`selected_{DSS,MTT,WORKFLOW}_<同一 batch timestamp>.xlsx`，各调对应现有
+   exporter（DSS/MTT/WORKFLOW 各自 schema、行模型不变）。某 type `requested==0` → 不生成文件、
+   `file_path=null`。**不生成 ALL 单一 workbook**。
+8. **计数语义**：per-type `requested`（去重后该类型数，含 ambiguous/not_found/detail 失败）、
+   `success`（成功进入 exporter 的 task 数）、`failed = requested - success`（`success+failed==requested`）、
+   `rows`（物理数据行，MTT/WORKFLOW 可展开多行）。全局 `Σ requested == unique_count`。
+9. **失败分级**：主详情失败 → failed + Export Errors；MTT enrichment 失败 → enrichment warning，
+   **不**计 failed。`failures[]` 保留真实 `error_type`（不压成笼统 detail_error）；连续 ≥5 次同一
+   session 相关（`RuntimeError`）→ summary warnings 追加 token 过期提示（不 abort）。
+10. **单 task 失败不中断整批**；唯一 fail-fast = 整个输入无效。**退出码只看 summary 顶层 `error`**
+    key（`failures[].error` 属嵌套、不触发 exit 1）。**stdout summary 不含** raw/transformations/
+    mapping·runtime·connection response 等完整 detail。
+11. **Mode A / Mode C 边界**：Agent 只做输入理解 + 生成临时 JSON + 调用 + 转述 summary；
+    **不**逐条 get-task 搬 detail、不自造 Excel、不自行统计（以 Python summary 为准）。
+
+### 对正文旧契约的反向修正
+
+正文「4 个只读子命令」已更新为「5 个（含 `export-selected`）」；`export-selected` 只读、无写路径。
+
+### 已验证 / 待确认
+
+- 校验/标准化/去重、DSS·WORKFLOW ambiguous_input、MTT 每 folder 一次 discovery + federated 直取、
+  只导出 selected（不含 folder 其它对象）、三独立文件、counts、跨类型共享缓存（DSS↔MTT 两种顺序）、
+  现有 export/get-task/ALL 无回归：fake 测试 A–X + U-1 + CLL 覆盖。
+- 本 feature **未解决** DSS/WORKFLOW org 级同名 ambiguity（by-name 固有风险，summary warning 提示）。
+
+*相关提交：本次（`feat: add selected task list export`）。*

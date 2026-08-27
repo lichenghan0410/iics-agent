@@ -392,6 +392,34 @@ WORKFLOW 的 `Task Summary` 使用**专用 9 列**：`Task Type, folder, orgId, 
 
 > `--type ALL` 导出时：通用 `Task Summary`（DSS + MTT）之外，额外生成一张 **`Workflow Tasks`** sheet（WORKFLOW 的 9 列 child 展开）；没有 WORKFLOW 时不生成该 sheet。
 
+### 4b. `export-selected` — 只导出指定 Task List
+
+`export <folder> --type X` 是「导出该 folder 下全部 X」;`export-selected` 是「**只导出你给的清单里指定的 task**」——不会因为某个 task 在某 folder 就把该 folder 下其它 task 一起导出。
+
+```powershell
+python .\iics_cli.py export-selected --input .\selected_tasks.json --output-dir .\exports
+```
+
+输入是一个 JSON 数组,每项 `{name, type, folder}`(都必须是字符串):
+
+```json
+[
+  {"name": "Task_A",     "type": "DSS",      "folder": "JAPAN_SCRM_DI"},
+  {"name": "Task_B",     "type": "MTT",      "folder": "JAPAN_SCRM_BAU"},
+  {"name": "Workflow_A", "type": "WORKFLOW", "folder": "JAPAN_COMMERCIAL_DWH"}
+]
+```
+
+行为:按类型分别生成 **3 个独立 Excel**(`selected_DSS_*.xlsx` / `selected_MTT_*.xlsx` / `selected_WORKFLOW_*.xlsx`,同一时间戳);某类型清单为空则不生成该文件。stdout 返回一个小型 summary JSON(`input_count / unique_count / duplicates_removed`、每类型 `requested/success/failed/rows/file_path`、`failures[]`、`warnings[]`),**不含**完整 detail。
+
+重要限制:
+
+- **DSS / WORKFLOW 按名查询**:若清单里同一 type+同一 name 出现在多个 folder,无法可靠区分,会被标记为 `ambiguous_input` 计入失败;且即使只选一个,组织内别的 folder 若有同名也无法保证(summary warning 会提示)。
+- **MTT 可按 folder 可靠消歧**(V3 定位 federated id),跨 folder 同名没问题。
+- 单个 task 失败不中断整批;只有整个输入 JSON 非法才会整体失败(exit 1)。
+
+> Mode A(Claude Code):可以从 Excel / CSV / Markdown 表格 / 粘贴文本整理出上面的 JSON 再调用;但 Python 正式入口**只接受 JSON**。最终统计以 summary 为准。
+
 ### 稳定性与导出判定
 
 - **`_request()` 带 timeout + 瞬时重试**：默认 timeout `(connect=10s, read=60s)`；对 `Timeout` / `ConnectionError` / HTTP `429/502/503/504` 最多重试 3 次（backoff 1s→2s），日志只进 stderr、不含 token。

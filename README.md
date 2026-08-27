@@ -392,6 +392,34 @@ child task が無い workflow も 1 行残します（child 3 列は空）。`fo
 
 > `--type ALL` の出力では、共通 `Task Summary`（DSS + MTT）に加えて **`Workflow Tasks`** sheet（WORKFLOW の 9 列 child 展開）を追加生成します。WORKFLOW が無い場合はこの sheet を生成しません。
 
+### 4b. `export-selected` — 指定した Task List のみ出力
+
+`export <folder> --type X` は「その folder 内の全 X を出力」ですが、`export-selected` は「**渡したリストで指定した task だけを出力**」します——ある task が特定 folder にあるからといって、その folder の他の task まで出力することはありません。
+
+```powershell
+python .\iics_cli.py export-selected --input .\selected_tasks.json --output-dir .\exports
+```
+
+入力は JSON 配列、各要素 `{name, type, folder}`（すべて文字列）:
+
+```json
+[
+  {"name": "Task_A",     "type": "DSS",      "folder": "JAPAN_SCRM_DI"},
+  {"name": "Task_B",     "type": "MTT",      "folder": "JAPAN_SCRM_BAU"},
+  {"name": "Workflow_A", "type": "WORKFLOW", "folder": "JAPAN_COMMERCIAL_DWH"}
+]
+```
+
+動作: 種別ごとに **独立した 3 つの Excel**（`selected_DSS_*.xlsx` / `selected_MTT_*.xlsx` / `selected_WORKFLOW_*.xlsx`、同一タイムスタンプ）を生成。ある種別のリストが空なら該当ファイルは生成しません。stdout には小さな summary JSON（`input_count / unique_count / duplicates_removed`、種別ごとの `requested/success/failed/rows/file_path`、`failures[]`、`warnings[]`）を返し、**完全な detail は含めません**。
+
+主な制約:
+
+- **DSS / WORKFLOW は名前照会**: リスト内で同一 type + 同一 name が複数 folder に出た場合は確実に区別できず `ambiguous_input`（失敗）扱い。1 件だけでも組織内の別 folder に同名があれば保証できません（summary warning で通知）。
+- **MTT は folder で確実に区別可能**（V3 で federated id を特定）、フォルダをまたいだ同名も問題なし。
+- 個別 task の失敗は全体を中断しません。入力 JSON 自体が不正な場合のみ全体失敗（exit 1）。
+
+> Mode A（Claude Code）は Excel / CSV / Markdown 表 / 貼り付けテキストから上記 JSON を作成して呼び出せますが、Python の正式入力は **JSON のみ**。最終集計は summary を正とします。
+
 ### 安定性と出力判定
 
 - **`_request()` に timeout + 一時エラー再試行**：既定 timeout `(connect=10s, read=60s)`。`Timeout` / `ConnectionError` / HTTP `429/502/503/504` を最大 3 回再試行（backoff 1s→2s）。ログは stderr のみ・token を含まない。

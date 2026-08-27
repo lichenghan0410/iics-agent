@@ -26,10 +26,12 @@ import argparse
 import json
 import os
 import sys
+from pathlib import Path
 
 from iics_client import SessionManager, IICSClient
 from tools.query import list_tasks, get_task_detail, resolve_connection
 from tools.exporter import export_results, build_task_summary_rows, compact_record
+from tools.selected_exporter import validate_selected_tasks, export_selected_tasks
 
 
 def create_client() -> IICSClient:
@@ -95,6 +97,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p_exp.add_argument("--summary-only", action="store_true")
     p_exp.add_argument("--format", default="excel", choices=["excel", "json"])
     p_exp.add_argument("--filename", default="")
+
+    # export-selected（只读；只导出输入 list 中指定的 task，按类型分别生成 3 个 Excel）
+    p_sel = sub.add_parser(
+        "export-selected",
+        help="只导出给定 task list（name/type/folder JSON）中指定的 task",
+    )
+    p_sel.add_argument("--input", required=True, help="selected task JSON 文件路径")
+    p_sel.add_argument("--output-dir", default=".", help="Excel 输出目录（不存在则创建）")
 
     return parser
 
@@ -207,11 +217,38 @@ def _cmd_export(client, args) -> dict:
     )
 
 
+def _cmd_export_selected(client, args) -> dict:
+    _log(f"running export-selected input={args.input} output-dir={args.output_dir}")
+    # 输入校验先于任何 IICS 请求；无效输入 → 顶层 fatal error（exit 1）
+    try:
+        text = Path(args.input).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {"error": f"input file not found: {args.input}",
+                "error_type": "SelectedTaskInputError"}
+    except OSError as e:
+        return {"error": f"cannot read input file: {e}",
+                "error_type": "SelectedTaskInputError"}
+    try:
+        raw = json.loads(text)
+    except json.JSONDecodeError as e:
+        return {"error": f"invalid JSON in input file: {e}",
+                "error_type": "SelectedTaskInputError"}
+
+    normalized, input_errors = validate_selected_tasks(raw)
+    if input_errors:
+        return {"error": "Invalid selected task input",
+                "error_type": "SelectedTaskInputError",
+                "input_errors": input_errors}
+
+    return export_selected_tasks(client, normalized, args.output_dir)
+
+
 _DISPATCH = {
     "list-tasks": _cmd_list_tasks,
     "get-task": _cmd_get_task,
     "resolve-connection": _cmd_resolve_connection,
     "export": _cmd_export,
+    "export-selected": _cmd_export_selected,
 }
 
 

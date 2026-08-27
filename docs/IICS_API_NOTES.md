@@ -256,6 +256,18 @@ tasks = [
 - child `taskId` 按 V2 response 原样保留，**不做 ID 类型推断**（不得当作 V3 federated ID）。
 - WORKFLOW export **不查询** child 的 MTT/DSS 详情（不新增请求）。
 
+### 7.6 Selected Task Export 复用的现有边界（Amendment 6，无新增 API research）
+
+`export-selected` 只是编排层，复用已实测的路径，**未引入新 API 结论**：
+
+- DSS 详情：`dsstask/name/{name}`（by-name）。
+- MTT 详情：V3 folder 枚举取 federated id → `mttask/frs/{federated_id}`。
+- WORKFLOW 详情：`workflow/name/{name}`（by-name）。
+
+**本 feature 未解决 DSS / WORKFLOW 的 organization 级同名 ambiguity**：by-name 端点无 folder 约束，
+组织内其它 folder 若存在同名 DSS/WORKFLOW，仍无法保证取到 selected folder 的那个（summary
+warning 提示，属固有风险，未扫描全组织）。MTT 经 folder discovery + federated id 无此问题。
+
 ---
 
 ## 8. 对 ADR-001「v2 前需重新确认项」的结论

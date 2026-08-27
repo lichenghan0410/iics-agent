@@ -30,6 +30,8 @@ python iics_cli.py list-tasks <folder> [--type DSS|MTT|WORKFLOW|ALL] [--page-siz
 python iics_cli.py get-task <task_name> <task_type> [--folder PATH] [--no-resolve]
 python iics_cli.py resolve-connection <id> [<id>...]
 python iics_cli.py export <folder> [--type ALL] [--format excel|json] [--filename NAME]
+# 只导出给定 list 中指定的 task（不是 folder 全量），按类型生成 3 个独立 Excel
+python iics_cli.py export-selected --input <selected_tasks.json> --output-dir <dir>
 ```
 
 ## 覆盖范围
@@ -85,6 +87,17 @@ python iics_cli.py export <folder> [--type ALL] [--format excel|json] [--filenam
 - WORKFLOW `get-task` 输出不变。
 - `--type WORKFLOW` 单类型：单张 9 列 `Task Summary`。**`--type ALL`：通用 `Task Summary`（DSS+MTT）
   + 单独 `Workflow Tasks`（9 列 child 展开）+ `Export Errors`**（Li 已确认分表方案）。
+
+## Selected Task Export（Amendment 6）
+
+- 用户给「混合 task 清单」时**不得**用 folder 全量 `export` 代替；应整理成 `{name, type, folder}`
+  写入临时 JSON，调 `export-selected`。
+- **不**逐条 `get-task` 把完整 detail 搬进 LLM 上下文；**不**自己生成 Excel；**不**自行统计
+  success/failed —— 最终数量、失败、文件路径**以 Python summary（stdout JSON）为准**。
+- 必须向用户报告 DSS / WORKFLOW 的 by-name 跨 folder 同名风险（summary warnings 已含）；MTT 可按
+  folder 可靠消歧。
+- Python 正式输入**只接受 JSON**（Agent 可从 Excel/CSV/Markdown/粘贴文本整理出该 JSON）。
+- Agent = 输入理解 + 编排 + 报告；Python = validation/discovery/API/cache/parse/Excel/summary。
 
 ## 安全边界
 

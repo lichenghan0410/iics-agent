@@ -348,6 +348,26 @@ python .\iics_cli.py export JAPAN_SCRM_DI --type WORKFLOW --format excel
 - [ ] `task_count == list-tasks count`；`rows = Σ max(1, child 数)`，可 > task_count。
 - [ ] WORKFLOW `get-task` 输出不变（扁平 dict）。
 
+### 6.6 Selected Task Export（Amendment 6）
+
+准备一个小型 `selected_tasks.json`（例：2 DSS + 3 MTT（至少来自 2 个 folder）+ 2 WORKFLOW），运行：
+
+```powershell
+python .\iics_cli.py export-selected --input .\selected_tasks.json --output-dir .\exports
+```
+
+验收（stdout summary）：
+
+- [ ] `input_count` / `unique_count` / `duplicates_removed` 正确（放两条完全相同的 tuple 验证去重）。
+- [ ] 每类型 `requested` / `success` / `failed` 且 `success + failed == requested`；
+      `Σ requested == unique_count`。
+- [ ] 三个 workbook（`selected_DSS_*` / `selected_MTT_*` / `selected_WORKFLOW_*`，同一时间戳）
+      **只包含 selected task**——特别确认不出现同 folder 内未被选中的 task。
+- [ ] DSS / WORKFLOW warnings（by-name 风险）存在；MTT 跨 folder 同名分别正确导出。
+- [ ] MTT 同一 folder 多个 selected → discovery 只发生一次（真实 API 次数不易黑盒确认，以 fake
+      regression 为主）。
+- [ ] summary 不含完整 detail / raw；个别失败不中断整批；输入 JSON 非法才整体 exit 1。
+
 ---
 
 ## 7. 常见失败与排查

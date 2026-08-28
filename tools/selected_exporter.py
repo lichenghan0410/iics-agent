@@ -25,79 +25,118 @@ _SESSION_RUN_THRESHOLD = 5
 
 # ── 输入校验 / 标准化 ────────────────────────────────────────────────────────
 def validate_selected_tasks(raw):
-    """校验并标准化 selected task 输入。返回 (normalized_list | None, input_errors)。"""
+    """校验并标准化 selected task 输入。返回 (normalized_list | None, input_errors)。
+
+    Amendment 8：folder 语义按类型区分。
+    - MTT：folder 是真实 identity/discovery 数据，必须存在、为字符串、trim 后非空。
+    - DSS / WORKFLOW：folder 在 detail 层不可用。允许缺省；若给出且 trim 后为空
+      （""/空白）→ 归一化丢弃 folder key；若给出非空值 → SelectedTaskInputError
+      快速失败（folder is only supported for MTT selected tasks），不触任何 API。
+    """
     if not isinstance(raw, list):
         return None, [{"index": None, "field": None,
+                       "error_type": "SelectedTaskInputError",
                        "message": "top-level input must be a JSON array"}]
     errors = []
     out = []
     for i, item in enumerate(raw):
         if not isinstance(item, dict):
             errors.append({"index": i, "field": None,
+                           "error_type": "SelectedTaskInputError",
                            "message": "item must be a JSON object"})
             continue
+        # name / type 为所有类型必需
         vals = {}
         bad = False
-        for f in ("name", "type", "folder"):
+        for f in ("name", "type"):
             if f not in item:
-                errors.append({"index": i, "field": f, "message": f"{f} is required"})
+                errors.append({"index": i, "field": f,
+                               "error_type": "SelectedTaskInputError",
+                               "message": f"{f} is required"})
                 bad = True
                 continue
             v = item.get(f)
             if not isinstance(v, str):
-                errors.append({"index": i, "field": f, "message": f"{f} must be a string"})
+                errors.append({"index": i, "field": f,
+                               "error_type": "SelectedTaskInputError",
+                               "message": f"{f} must be a string"})
                 bad = True
                 continue
             vals[f] = v
         if bad:
             continue
         name = vals["name"].strip()
-        folder = vals["folder"].strip()
         ttype = vals["type"].strip().upper()
         if not name:
-            errors.append({"index": i, "field": "name", "message": "name must not be empty"})
-            continue
-        if not folder:
-            errors.append({"index": i, "field": "folder", "message": "folder must not be empty"})
+            errors.append({"index": i, "field": "name",
+                           "error_type": "SelectedTaskInputError",
+                           "message": "name must not be empty"})
             continue
         if ttype not in _VALID_TYPES:
             errors.append({"index": i, "field": "type",
+                           "error_type": "SelectedTaskInputError",
                            "message": "type must be DSS, MTT, or WORKFLOW"})
             continue
-        out.append({"name": name, "type": ttype, "folder": folder})
+
+        if ttype == "MTT":
+            if "folder" not in item:
+                errors.append({"index": i, "field": "folder",
+                               "error_type": "SelectedTaskInputError",
+                               "message": "folder is required for MTT selected tasks"})
+                continue
+            fv = item.get("folder")
+            if not isinstance(fv, str):
+                errors.append({"index": i, "field": "folder",
+                               "error_type": "SelectedTaskInputError",
+                               "message": "folder must be a string"})
+                continue
+            folder = fv.strip()
+            if not folder:
+                errors.append({"index": i, "field": "folder",
+                               "error_type": "SelectedTaskInputError",
+                               "message": "folder must not be empty for MTT selected tasks"})
+                continue
+            out.append({"name": name, "type": ttype, "folder": folder})
+        else:
+            # DSS / WORKFLOW：folder 可缺省；给出非空值即快速失败
+            if "folder" in item and item.get("folder") is not None:
+                fv = item.get("folder")
+                if not isinstance(fv, str):
+                    errors.append({"index": i, "field": "folder",
+                                   "error_type": "SelectedTaskInputError",
+                                   "message": "folder must be a string"})
+                    continue
+                if fv.strip():
+                    errors.append({"index": i, "field": "folder",
+                                   "error_type": "SelectedTaskInputError",
+                                   "message": "folder is only supported for MTT "
+                                              "selected tasks"})
+                    continue
+                # 空白 folder → 归一化丢弃
+            out.append({"name": name, "type": ttype})
     if errors:
         return None, errors
     return out, []
 
 
+def _selection_identity(item):
+    """去重身份键：MTT 用 (type, folder, name)；DSS / WORKFLOW 用 (type, name)。"""
+    if item["type"] == "MTT":
+        return (item["type"], item.get("folder", ""), item["name"])
+    return (item["type"], item["name"])
+
+
 def _dedup(tasks):
-    """exact-tuple (type, folder, name) 去重，保持首次出现顺序。"""
+    """按 _selection_identity 去重，保持首次出现顺序。"""
     seen = set()
     out = []
     for t in tasks:
-        key = (t["type"], t["folder"], t["name"])
+        key = _selection_identity(t)
         if key in seen:
             continue
         seen.add(key)
         out.append(t)
     return out
-
-
-def detect_input_ambiguities(unique_tasks):
-    """DSS / WORKFLOW：同 type + 同 name 但不同 folder（by-name 无法消歧）→ ambiguous_input。
-
-    返回被标记的 (type, folder, name) 集合。exact-tuple 已去重，不属于 ambiguity。
-    """
-    folders_by_key = {}
-    for t in unique_tasks:
-        if t["type"] in ("DSS", "WORKFLOW"):
-            folders_by_key.setdefault((t["type"], t["name"]), set()).add(t["folder"])
-    ambiguous = set()
-    for (typ, name), folders in folders_by_key.items():
-        if len(folders) > 1:
-            for f in folders:
-                ambiguous.add((typ, f, name))
-    return ambiguous
 
 
 # ── MTT folder discovery ─────────────────────────────────────────────────────
@@ -134,27 +173,17 @@ def _write_type(client, ttype, details, failed_local, output_dir, ts):
     return res.get("rows", 0), res.get("file_path"), res.get("enrichment_warnings_count", 0)
 
 
-def _process_by_name(client, ttype, tuples, ambiguous, failures, output_dir, ts):
-    """DSS / WORKFLOW：input ambiguity 先过滤，其余走现有 by-name detail。"""
+def _process_by_name(client, ttype, tuples, failures, output_dir, ts):
+    """DSS / WORKFLOW：纯 by-name detail（Amendment 8：无 folder，无 ambiguity 分支）。"""
     requested = len(tuples)
     if requested == 0:
         return _empty_result()
     details = []
     failed_local = []
     for t in tuples:
-        key = (ttype, t["folder"], t["name"])
-        if key in ambiguous:
-            f = {"type": ttype, "folder": t["folder"], "name": t["name"],
-                 "error_type": "ambiguous_input",
-                 "error": f"The same {ttype} name was selected from multiple folders, "
-                          f"but {ttype} details are resolved by name only."}
-            failed_local.append(f)
-            failures.append(f)
-            continue
-        d = get_task_detail(client, task_name=t["name"], task_type=ttype,
-                            folder_path=t["folder"])
+        d = get_task_detail(client, task_name=t["name"], task_type=ttype)
         if isinstance(d, dict) and "error" in d:
-            f = {"type": ttype, "folder": t["folder"], "name": t["name"],
+            f = {"type": ttype, "name": t["name"],
                  "error_type": d.get("error_type", ""), "error": d.get("error", "")}
             failed_local.append(f)
             failures.append(f)
@@ -267,28 +296,27 @@ def export_selected_tasks(client, selected_tasks, output_dir):
     unique = _dedup(selected_tasks)
     unique_count = len(unique)
 
-    ambiguous = detect_input_ambiguities(unique)
     by_type = {t: [] for t in _VALID_TYPES}
     for t in unique:
         by_type[t["type"]].append(t)
 
     failures = []
     results = {}
-    results["DSS"] = _process_by_name(client, "DSS", by_type["DSS"], ambiguous,
+    results["DSS"] = _process_by_name(client, "DSS", by_type["DSS"],
                                       failures, output_dir, ts)
     results["MTT"] = _process_mtt(client, by_type["MTT"], failures, output_dir, ts)
     results["WORKFLOW"] = _process_by_name(client, "WORKFLOW", by_type["WORKFLOW"],
-                                           ambiguous, failures, output_dir, ts)
+                                           failures, output_dir, ts)
 
     warnings = []
     if by_type["DSS"]:
-        warnings.append("DSS details are resolved by name only; folder identity cannot "
-                        "be guaranteed when duplicate names exist elsewhere in the "
-                        "organization.")
+        warnings.append("DSS details are resolved by name only; folder identity is "
+                        "unavailable and duplicate names elsewhere in the organization "
+                        "cannot be disambiguated.")
     if by_type["WORKFLOW"]:
-        warnings.append("WORKFLOW details are resolved by name only; folder identity "
-                        "cannot be guaranteed when duplicate names exist elsewhere in "
-                        "the organization.")
+        warnings.append("WORKFLOW details are resolved by name only; folder identity is "
+                        "unavailable and duplicate names elsewhere in the organization "
+                        "cannot be disambiguated.")
     warnings.extend(_session_warnings(failures))
 
     return {

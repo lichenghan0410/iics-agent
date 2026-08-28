@@ -119,7 +119,7 @@ claude `
 | 你说 | claude 实际执行 |
 |------|----------------|
 | 「列出 JAPAN_SCRM_DI 下的 DSS task」 | `python iics_cli.py list-tasks JAPAN_SCRM_DI --type DSS` |
-| 「看 DI_FACT_SALES_DAILY 这个 DSS 的详情」 | `python iics_cli.py get-task DI_FACT_SALES_DAILY DSS --folder JAPAN_SCRM_DI` |
+| 「看 DI_FACT_SALES_DAILY 这个 DSS 的详情」 | `python iics_cli.py get-task DI_FACT_SALES_DAILY DSS`（DSS 不带 `--folder`，Amendment 8） |
 | 「把这个 connection id 解析成名字」 | `python iics_cli.py resolve-connection 000LVU...` |
 | 「导出 JAPAN_COMMERCIAL_DWH 的所有 task 到 Excel」 | `python iics_cli.py export JAPAN_COMMERCIAL_DWH --type ALL` |
 | 「跑一遍冒烟测试」 | `python smoke_test.py` |
@@ -154,9 +154,12 @@ python smoke_test.py
 python iics_cli.py list-tasks JAPAN_SCRM_DI --type DSS
 echo "exit=$LASTEXITCODE"   # 期望 0；有 error 时为 1
 
-# B. 详情（验证 V2 by-name 路由 + connection name 解析；v0.1 不做 V3 按名消歧，见 ADR Amendment 1）
-python iics_cli.py get-task <真实TASK名> DSS --folder JAPAN_SCRM_DI
+# B. 详情（验证 V2 by-name 路由 + connection name 解析；DSS/WORKFLOW 不接受 --folder，Amendment 8）
+python iics_cli.py get-task <真实TASK名> DSS
 echo "exit=$LASTEXITCODE"
+# B2. 反例（Amendment 8）：DSS 传非空 --folder → UnsupportedArgumentError、exit 1、无 HTTP
+python iics_cli.py get-task <真实TASK名> DSS --folder JAPAN_SCRM_DI
+echo "exit=$LASTEXITCODE"   # 期望 1
 
 # C. 连接解析（验证缓存与 failed 列表）
 python iics_cli.py resolve-connection <真实CONN_ID>
@@ -193,7 +196,7 @@ Set-Location -LiteralPath "D:\IICS Agent"
 $env:IICS_SESSION_TOKEN = "<USER_SESSION 值>"
 
 python iics_cli.py list-tasks JAPAN_SCRM_DI --type DSS
-python iics_cli.py get-task <真实TASK名> DSS --folder JAPAN_SCRM_DI
+python iics_cli.py get-task <真实TASK名> DSS
 python iics_cli.py resolve-connection <真实CONN_ID>
 python iics_cli.py export JAPAN_COMMERCIAL_DWH --type ALL
 ```
@@ -337,20 +340,21 @@ Excel / schema：
 python .\iics_cli.py export JAPAN_SCRM_DI --type WORKFLOW --format excel
 ```
 
-- [ ] 该 workflow 在 Excel 中出现 **2 行**；父字段（含 `folder = JAPAN_SCRM_DI`）两行完全一致。
+- [ ] 该 workflow 在 Excel 中出现 **2 行**；父字段两行完全一致。
 - [ ] child rows：`000LVU0Z000000006V4F / MTT / mt_..._WK` 与 `000LVU0Z00000000087Z / MTT / mt_...`。
-- [ ] `Task Summary` header 恰为 **9 列**（`Task Type, folder, orgId, id, Task Name, updateTime,
-      tasks.taskId, tasks.type, tasks.name`）；无 `runtime_environment` / `Mapping Name` /
-      `Transformation Name` / `Connection` 等通用列。
+- [ ] `Task Summary` header 恰为 **8 列（Amendment 8：无 folder）**（`Task Type, orgId, id,
+      Task Name, updateTime, tasks.taskId, tasks.type, tasks.name`）；无 `folder` /
+      `runtime_environment` / `Mapping Name` / `Transformation Name` / `Connection` 等列。
 - [ ] 每个 WORKFLOW 仅 1 个 `workflow/name/{name}` 请求；无 `mttask/*` / `dsstask/*` /
       `workflow/{childId}` child 请求。
 - [ ] zero-child workflow 仍占 1 行；detail 失败保留 1 fallback 行并计入 `rows`。
 - [ ] `task_count == list-tasks count`；`rows = Σ max(1, child 数)`，可 > task_count。
 - [ ] WORKFLOW `get-task` 输出不变（扁平 dict）。
 
-### 6.6 Selected Task Export（Amendment 6）
+### 6.6 Selected Task Export（Amendment 6 / 8）
 
-准备一个小型 `selected_tasks.json`（例：2 DSS + 3 MTT（至少来自 2 个 folder）+ 2 WORKFLOW），运行：
+准备一个小型 `selected_tasks.json`（例：2 DSS + 3 MTT（至少来自 2 个 folder）+ 2 WORKFLOW），
+**注意 Amendment 8 输入 schema**：MTT `{name,type,folder}`、DSS/WORKFLOW `{name,type}`（无 folder）。运行：
 
 ```powershell
 python .\iics_cli.py export-selected --input .\selected_tasks.json --output-dir .\exports
@@ -363,7 +367,10 @@ python .\iics_cli.py export-selected --input .\selected_tasks.json --output-dir 
       `Σ requested == unique_count`。
 - [ ] 三个 workbook（`selected_DSS_*` / `selected_MTT_*` / `selected_WORKFLOW_*`，同一时间戳）
       **只包含 selected task**——特别确认不出现同 folder 内未被选中的 task。
-- [ ] DSS / WORKFLOW warnings（by-name 风险）存在；MTT 跨 folder 同名分别正确导出。
+- [ ] DSS / WORKFLOW warnings 存在且为新措辞（`folder identity is unavailable ...`，Amendment 8）；
+      MTT 跨 folder 同名分别正确导出（dedup 键 MTT=`(type,folder,name)`、DSS/WF=`(type,name)`）。
+- [ ] （Amendment 8）DSS/WORKFLOW item 带非空 `folder` → 整体 `SelectedTaskInputError`、exit 1、
+      0 workbook；DSS/WORKFLOW 失败对象无 `folder` 字段；MTT 失败对象保留 `folder`。
 - [ ] MTT 同一 folder 多个 selected → discovery 只发生一次（真实 API 次数不易黑盒确认，以 fake
       regression 为主）。
 - [ ] summary 不含完整 detail / raw；个别失败不中断整批；输入 JSON 非法才整体 exit 1。
@@ -384,8 +391,8 @@ python .\iics_cli.py export JAPAN_SCRM_DI --type DSS --format excel
 DSS get-task：
 
 ```powershell
-python .\iics_cli.py get-task <NAME> DSS --folder <FOLDER>          # 默认 compact
-python .\iics_cli.py get-task <NAME> DSS --folder <FOLDER> --full   # 完整 detail
+python .\iics_cli.py get-task <NAME> DSS          # 默认 compact（Amendment 8：DSS 不带 --folder）
+python .\iics_cli.py get-task <NAME> DSS --full   # 完整 detail
 ```
 
 - [ ] 默认：`task_count==1`、`rows==1`、`len(records)==1`、record keys == 11 列 DSS_HEADERS。

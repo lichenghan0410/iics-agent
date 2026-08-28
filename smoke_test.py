@@ -74,10 +74,17 @@ def main() -> int:
     else:
         task_name = TEST_TASK or result_typed["tasks"][0]["name"]
 
-        # MTT 与 DSS/WORKFLOW 一律传 name + folder；MTT 内部走 V3→federated→FRS
-        detail = get_task_detail(
-            client, task_name=task_name, task_type=TEST_TYPE, folder_path=TEST_FOLDER,
-        )
+        # Amendment 8：folder 仅 MTT 需要（V3→federated→FRS）；DSS/WORKFLOW 按 name
+        # 解析、不得传 folder（否则 UnsupportedArgumentError）。
+        if TEST_TYPE == "MTT":
+            detail = get_task_detail(
+                client, task_name=task_name, task_type=TEST_TYPE,
+                folder_path=TEST_FOLDER,
+            )
+        else:
+            detail = get_task_detail(
+                client, task_name=task_name, task_type=TEST_TYPE,
+            )
         assert "error" not in detail, f"get_task_detail error: {detail}"
         assert "runtime_environment" in detail
         if TEST_TYPE == "MTT":

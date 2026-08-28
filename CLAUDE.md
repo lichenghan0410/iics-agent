@@ -28,6 +28,7 @@ export IICS_SESSION_TOKEN="<USER_SESSION 值>"
 ```bash
 python iics_cli.py list-tasks <folder> [--type DSS|MTT|WORKFLOW|ALL] [--page-size N]
 python iics_cli.py get-task <task_name> <task_type> [--folder PATH] [--no-resolve]
+#   --folder 仅 MTT（定位 federated id）；DSS/WORKFLOW 不接受 --folder（Amendment 8）
 python iics_cli.py resolve-connection <id> [<id>...]
 python iics_cli.py export <folder> [--type ALL] [--format excel|json] [--filename NAME]
 # 只导出给定 list 中指定的 task（不是 folder 全量），按类型生成 3 个独立 Excel
@@ -74,20 +75,24 @@ python iics_cli.py export-selected --input <selected_tasks.json> --output-dir <d
 
 - **不得**使用 `task_id` / `task_id_type` 新参数。
 - **不得**用 V3 federated ID 调 V2 by-id（实测返回 500，是 MTT 类型特例）。
-- 保持现状 V2 by-name；跨 folder 同名仍是已知限制。
+- 保持现状 V2 by-name。
+- **（Amendment 8）DSS / WORKFLOW detail 层无可靠 folder identity**：`get-task` 不接受
+  `--folder`（传入非空 → `UnsupportedArgumentError`，不发 HTTP）；normalized detail **不含**
+  合成 `folder` 键。folder 仅在 `export`/`list-tasks` 作**枚举范围**，不下沉到 detail 查询。
 
 ## WORKFLOW export 规则（Amendment 5）
 
 - WORKFLOW 详情继续用 `workflow/name/{name}`（不改路由；不得把 child `taskId` 当 V3 federated ID）。
 - WORKFLOW export **只展开 `raw.tasks[]`**：一个 child = 一行；**不得**为 child 再查
   `mttask/{id}` / `mttask/name/{name}` / `workflow/{child_id}` 等 child 详情。
-- WORKFLOW Excel 用**独立 9 列 schema**：`Task Type, folder, orgId, id, Task Name, updateTime,
-  tasks.taskId, tasks.type, tasks.name`（含 `folder`，取自 export 的 `<FOLDER>`）。父字段逐行重复。
+- WORKFLOW Excel 用**独立 8 列 schema（Amendment 8：去 folder）**：`Task Type, orgId, id,
+  Task Name, updateTime, tasks.taskId, tasks.type, tasks.name`。父字段逐行重复。
+  （Amendment 5 曾为 9 列含 folder；Amendment 8 起去除——WORKFLOW by-name 无 folder identity。）
 - 无 child 的 workflow 仍保留 1 行；detail 失败保留 1 fallback 行并计入 `rows`（按 `max(1,len)`）。
 - WORKFLOW `get-task` 输出不变。
 - `--type WORKFLOW` 单类型：单张 9 列 `Task Summary`。
-- **`--type ALL`（Amendment 7）：三张独立业务 sheet，固定顺序 `MTT Task`(22) → `DSS Tasks`(11)
-  → `Workflow Tasks`(9) → `Export Errors`**（DSS 不再与 MTT 同表）。
+- **`--type ALL`：三张独立业务 sheet，固定顺序 `MTT Task`(22) → `DSS Tasks`(11)
+  → `Workflow Tasks`(8，Amendment 8) → `Export Errors`**（DSS 不再与 MTT 同表）。
 
 ## DSS export 规则（Amendment 7）
 
@@ -97,10 +102,20 @@ python iics_cli.py export-selected --input <selected_tasks.json> --output-dir <d
 - DSS detail route **仍 `dsstask/name/{name}`**，不新增 API、不用 federated id。
 - `get-task <name> DSS` 默认 compact（records=DSS_HEADERS）；`--full` 完整 detail。
 
-## Selected Task Export（Amendment 6）
+## Selected Task Export（Amendment 6 / 8）
 
-- 用户给「混合 task 清单」时**不得**用 folder 全量 `export` 代替；应整理成 `{name, type, folder}`
-  写入临时 JSON，调 `export-selected`。
+- 用户给「混合 task 清单」时**不得**用 folder 全量 `export` 代替；整理成 JSON 调 `export-selected`。
+- **输入 schema 按类型（Amendment 8）**：MTT `{name, type, folder}`（folder 必需、非空）；
+  DSS / WORKFLOW `{name, type}`（**无 folder**）。DSS/WORKFLOW 的 `folder:""`/纯空白 → 归一化丢弃；
+  `folder:"非空"` → `SelectedTaskInputError` 快速失败（0 API、0 workbook、exit 1）。
+- 去重键按类型：MTT `(type, folder, name)`、DSS/WORKFLOW `(type, name)`；MTT 跨 folder 同名永不去重。
+- **Mode A 构造 selected JSON 规则（Amendment 8）**：
+  - MTT：必须带 folder。
+  - DSS / WORKFLOW：用户未给 folder 或给空白 → JSON 里**不写** folder key。
+  - DSS / WORKFLOW：用户**明确给了非空 folder** → **原样转写进 JSON，不得静默过滤/忽略**，交由
+    Python 校验快速失败（`SelectedTaskInputError`），再据 summary 向用户解释「DSS/WORKFLOW 按 name
+    解析、不支持 folder」。静默吞掉非空 folder 是被禁止的。
+- **get-task 同理**：DSS/WORKFLOW 不要向用户索要 folder、也不要自行补 `--folder`；MTT 仍需 folder。
 - **不**逐条 `get-task` 把完整 detail 搬进 LLM 上下文；**不**自己生成 Excel；**不**自行统计
   success/failed —— 最终数量、失败、文件路径**以 Python summary（stdout JSON）为准**。
 - 必须向用户报告 DSS / WORKFLOW 的 by-name 跨 folder 同名风险（summary warnings 已含）；MTT 可按

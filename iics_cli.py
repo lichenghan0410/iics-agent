@@ -10,6 +10,7 @@ Session token:
 子命令:
   python iics_cli.py list-tasks <folder> [--type DSS|MTT|WORKFLOW|ALL] [--page-size N]
   python iics_cli.py get-task <task_name> <task_type> [--folder PATH] [--no-resolve]
+                       # --folder 仅 MTT；DSS/WORKFLOW 按 name 解析、不接受 --folder
   python iics_cli.py resolve-connection <id> [<id>...]
   python iics_cli.py export <folder> [--type ALL] [--details|--summary-only]
                        [--format excel|json] [--filename NAME]
@@ -75,7 +76,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p_get.add_argument("type", choices=["DSS", "MTT", "WORKFLOW"])
     p_get.add_argument(
         "--folder", default="",
-        help="MTT 必需（用于 V3 定位 federated id）；DSS/WORKFLOW 可选",
+        help="MTT 必需（用于 V3 定位 federated id）；DSS / WORKFLOW 不支持——"
+             "其详情按 name 解析，传入非空 --folder 将报 UnsupportedArgumentError",
     )
     p_get.add_argument(
         "--full", action="store_true",
@@ -182,20 +184,22 @@ def _cmd_export(client, args) -> dict:
                     if not detail.get("task_location"):
                         detail["task_location"] = args.folder
             else:
-                # DSS / WORKFLOW：保持现状 by-name
+                # DSS / WORKFLOW：by-name（Amendment 8：folder 仅是枚举范围，
+                # detail 层无 folder identity，不传 folder_path）
                 detail = get_task_detail(
                     client,
                     task_name=name,
                     task_type=ttype,
-                    folder_path=args.folder,
                 )
             if isinstance(detail, dict) and "error" in detail:
                 # 单个 task 详情失败：记录，不中断整批 export
+                # Export Errors.folder 按类型：MTT=枚举/identity folder；DSS/WF="".
+                err_folder = args.folder if ttype == "MTT" else ""
                 failed_details.append(
                     {
                         "name": name,
                         "type": ttype,
-                        "folder": args.folder,
+                        "folder": err_folder,
                         "error_type": detail.get("error_type", ""),
                         "error": detail.get("error", ""),
                     }
@@ -205,7 +209,7 @@ def _cmd_export(client, args) -> dict:
                     {
                         "name": name,
                         "type": ttype,
-                        "folder": args.folder,
+                        "folder": err_folder,
                         "status": task.get("status", ""),
                     }
                 )

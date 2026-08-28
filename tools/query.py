@@ -563,11 +563,19 @@ def get_task_detail(
             "error_type": "ConflictingArgumentsError",
         }
 
-    # DSS / WORKFLOW 不支持新参数
+    # DSS / WORKFLOW 不支持 task_id/task_id_type
     if task_type in ("DSS", "WORKFLOW") and (task_id or task_id_type):
         return {
             "error": "task_id and task_id_type are only supported for MTT "
                      "federated lookup",
+            "error_type": "UnsupportedArgumentError",
+        }
+
+    # Amendment 8：DSS / WORKFLOW by-name 不支持 folder identity（不发 HTTP）
+    if task_type in ("DSS", "WORKFLOW") and folder_path and folder_path.strip():
+        return {
+            "error": f"--folder is not supported for {task_type} get-task because "
+                     f"{task_type} details are resolved by name only.",
             "error_type": "UnsupportedArgumentError",
         }
 
@@ -577,14 +585,15 @@ def get_task_detail(
             resolve_connections,
         )
 
-    # ── DSS / WORKFLOW：现状 by-name（行为不变）─────────────────────────────
+    # ── DSS / WORKFLOW：V2 by-name（Amendment 8：detail 不含 synthetic folder）────
     if not task_name:
         return {"error": "task_name is required", "error_type": "ValueError"}
     try:
         path = _V2_DETAIL_PATH[task_type] + task_name
         resp = client._request("GET", path, use_v3=False)
         raw = resp.json()
-        detail = {"name": task_name, "type": task_type, "folder": folder_path}
+        # 不写入 folder：by-name detail 无可靠 folder identity，不得从用户输入伪造
+        detail = {"name": task_name, "type": task_type}
         return _apply_extraction(client, detail, raw, task_type, resolve_connections)
     except Exception as e:  # noqa: BLE001 — 工具层统一结构化错误
         return {"error": str(e), "error_type": type(e).__name__}

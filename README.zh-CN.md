@@ -160,7 +160,7 @@ echo $LASTEXITCODE
 $env:IICS_SESSION_TOKEN = "<USER_SESSION 值>"
 
 python iics_cli.py list-tasks JAPAN_SCRM_DI --type DSS
-python iics_cli.py get-task DI_FACT_SALES_DAILY DSS --folder JAPAN_SCRM_DI
+python iics_cli.py get-task DI_FACT_SALES_DAILY DSS
 python iics_cli.py resolve-connection 000LVU0B000000000015
 python iics_cli.py export JAPAN_COMMERCIAL_DWH --type ALL
 ```
@@ -199,7 +199,7 @@ claude `
 | 你说 | Claude Code CLI 实际执行 |
 |------|--------------------------|
 | 「列出 JAPAN_SCRM_DI 下的 DSS task」 | `python iics_cli.py list-tasks JAPAN_SCRM_DI --type DSS` |
-| 「看 DI_FACT_SALES_DAILY 这个 DSS 的详情」 | `python iics_cli.py get-task DI_FACT_SALES_DAILY DSS --folder JAPAN_SCRM_DI` |
+| 「看 DI_FACT_SALES_DAILY 这个 DSS 的详情」 | `python iics_cli.py get-task DI_FACT_SALES_DAILY DSS` |
 | 「把这个 connection id 解析成名字」 | `python iics_cli.py resolve-connection 000LVU...` |
 | 「导出 JAPAN_COMMERCIAL_DWH 的所有 task 到 Excel」 | `python iics_cli.py export JAPAN_COMMERCIAL_DWH --type ALL` |
 
@@ -252,13 +252,13 @@ python iics_cli.py get-task <task_name> <task_type> [--folder PATH] [--no-resolv
 |------|------|------|
 | `<task_name>` | 是 | task 名称 |
 | `<task_type>` | 是 | `DSS` / `MTT` / `WORKFLOW` |
-| `--folder` | **强烈建议填** | 见下方"同名 task"说明 |
+| `--folder` | **仅 MTT 必填** | MTT 用于定位 federated ID。**DSS / WORKFLOW 不支持**（传非空会报 `UnsupportedArgumentError`，Amendment 8） |
 | `--no-resolve` | 否 | 跳过 connection ID → 名称解析，只看 ID |
 
 示例：
 
 ```powershell
-python iics_cli.py get-task DI_FACT_SALES_DAILY DSS --folder JAPAN_SCRM_DI
+python iics_cli.py get-task DI_FACT_SALES_DAILY DSS
 ```
 
 返回：
@@ -267,7 +267,6 @@ python iics_cli.py get-task DI_FACT_SALES_DAILY DSS --folder JAPAN_SCRM_DI
 {
   "name": "DI_FACT_SALES_DAILY",
   "type": "DSS",
-  "folder": "JAPAN_SCRM_DI",
   "runtime_environment": {"id": null, "name": ""},
   "source_connection": {"id": "000LVU0B000000000015", "name": "SCRM_ORA_STDB"},
   "target_connection": {"id": "000LVU0B00000000009O", "name": "mysql_scrm_hnn_api"},
@@ -285,7 +284,7 @@ python iics_cli.py get-task DI_FACT_SALES_DAILY DSS --folder JAPAN_SCRM_DI
 > python .\iics_cli.py get-task TASK_NAME MTT --folder JAPAN_SCRM_BAU
 > ```
 >
-> MTT 不支持直接使用 `--id`。**DSS / WORKFLOW** 的 `--folder` 仍为可选，且它们跨文件夹同名时仍可能有歧义（建议也带上 `--folder`）。
+> MTT 不支持直接使用 `--id`。**DSS / WORKFLOW 不支持 `--folder`**（Amendment 8）：详情只按 name 解析，detail 层没有可靠的 folder identity。传非空 `--folder` 会报 `UnsupportedArgumentError`（在发 HTTP 之前）。folder 只在 `list-tasks` / `export` 作为**枚举范围**使用。
 
 **MTT `get-task` 默认输出（运维用）** 只显示与 Excel `Task Summary` 相同的业务字段，一个 transformation 一条 record：
 
@@ -371,7 +370,7 @@ Excel 含 2 个 sheet（原 `Field Mapping` / `Truncation Risk` 已移除）：
 |------|-----:|--------|----|
 | **DSS** | 11 | 1 task = 1 行 | `@type, id, orgId, Task Name, Task Type, Task Updated On, Source Connection, Source Object, Operation, Target Connection, Target Object` |
 | **MTT** | 22 | 每个 Source/Target transformation = 1 行 | `@type, id, orgId, Task Name, Task Type, Task Location, Runtime Environment, Task Updated On, Mapping Name, Mapping Updated On, Transformation Name, Source Connection, Source Object, Custom Query, Target Connection, Operation, Target Object, Parameter File Directory, Parameter File Name, Pre-Processing Commands, Post-Processing Commands, Status` |
-| **WORKFLOW** | 9 | 每个 `tasks[]` child = 1 行 | `Task Type, folder, orgId, id, Task Name, updateTime, tasks.taskId, tasks.type, tasks.name` |
+| **WORKFLOW** | 8 | 每个 `tasks[]` child = 1 行 | `Task Type, orgId, id, Task Name, updateTime, tasks.taskId, tasks.type, tasks.name`（Amendment 8：删除 `folder` 列） |
 
 单类型导出（`--type DSS` / `--type MTT` / `--type WORKFLOW`）业务 sheet 名均为 `Task Summary`，配合 `Export Errors`（错误/警告记录，都没有时写单行 `No export errors`）。DSS 的 `Source Object` 只取 `sourceObjects[0].name`（单值，不展开）。
 
@@ -383,17 +382,17 @@ Excel 含 2 个 sheet（原 `Field Mapping` / `Truncation Risk` 已移除）：
 python .\iics_cli.py export JAPAN_SCRM_DI --type WORKFLOW --format excel
 ```
 
-WORKFLOW 的 `Task Summary` 使用**专用 9 列**：`Task Type, folder, orgId, id, Task Name, updateTime, tasks.taskId, tasks.type, tasks.name`。
+WORKFLOW 的 `Task Summary` 使用**专用 8 列**：`Task Type, orgId, id, Task Name, updateTime, tasks.taskId, tasks.type, tasks.name`（Amendment 8 删除 `folder` 列——WORKFLOW 只按 name 解析，detail 层无 folder identity）。
 
-**每个 workflow 的 `tasks[]` child 独立占一行**；父级字段（`Task Type` / `folder` / `orgId` / `id` / `Task Name` / `updateTime`）在每行重复；child 字段（`tasks.taskId` / `tasks.type` / `tasks.name`）单独展示。例：
+**每个 workflow 的 `tasks[]` child 独立占一行**；父级字段（`Task Type` / `orgId` / `id` / `Task Name` / `updateTime`）在每行重复；child 字段（`tasks.taskId` / `tasks.type` / `tasks.name`）单独展示。例：
 
 ```text
 1 个 workflow + 2 个 child task → Excel 2 行（父级字段两行相同）
 ```
 
-无 child task 的 workflow 仍占 1 行（child 三列留空）。`folder` 取自命令行的 `<FOLDER>`。WORKFLOW export 不查询 child 的 MTT/DSS 详情。**WORKFLOW `get-task` 输出不变**（仍为完整扁平 detail）。
+无 child task 的 workflow 仍占 1 行（child 三列留空）。WORKFLOW export 不查询 child 的 MTT/DSS 详情。**WORKFLOW `get-task` 输出不变**（仍为完整扁平 detail）。
 
-> `--type ALL` 导出时生成三张独立业务 sheet（固定顺序）：**`MTT Task`（22 列）→ `DSS Tasks`（11 列）→ `Workflow Tasks`（9 列）**，再加 `Export Errors`。三类各用自己的 schema，DSS 不再与 MTT 同表。
+> `--type ALL` 导出时生成三张独立业务 sheet（固定顺序）：**`MTT Task`（22 列）→ `DSS Tasks`（11 列）→ `Workflow Tasks`（8 列，Amendment 8）**，再加 `Export Errors`。三类各用自己的 schema，DSS 不再与 MTT 同表。
 
 ### 4b. `export-selected` — 只导出指定 Task List
 
@@ -403,22 +402,24 @@ WORKFLOW 的 `Task Summary` 使用**专用 9 列**：`Task Type, folder, orgId, 
 python .\iics_cli.py export-selected --input .\selected_tasks.json --output-dir .\exports
 ```
 
-输入是一个 JSON 数组,每项 `{name, type, folder}`(都必须是字符串):
+输入是一个 JSON 数组。**schema 按类型区分（Amendment 8）**：MTT 为 `{name, type, folder}`（`folder` 必填、非空）；DSS / WORKFLOW 为 `{name, type}`（**无 folder**）:
 
 ```json
 [
-  {"name": "Task_A",     "type": "DSS",      "folder": "JAPAN_SCRM_DI"},
+  {"name": "Task_A",     "type": "DSS"},
   {"name": "Task_B",     "type": "MTT",      "folder": "JAPAN_SCRM_BAU"},
-  {"name": "Workflow_A", "type": "WORKFLOW", "folder": "JAPAN_COMMERCIAL_DWH"}
+  {"name": "Workflow_A", "type": "WORKFLOW"}
 ]
 ```
+
+> DSS / WORKFLOW 的 `folder:""`（空字符串/纯空白）会被忽略并归一化;但传入**非空 folder 会直接 `SelectedTaskInputError` 快速失败**(0 次 API、0 个 workbook,exit 1)——因为 DSS / WORKFLOW 只按 name 解析,没有 folder identity。
 
 行为:按类型分别生成 **3 个独立 Excel**(`selected_DSS_*.xlsx` / `selected_MTT_*.xlsx` / `selected_WORKFLOW_*.xlsx`,同一时间戳);某类型清单为空则不生成该文件。stdout 返回一个小型 summary JSON(`input_count / unique_count / duplicates_removed`、每类型 `requested/success/failed/rows/file_path`、`failures[]`、`warnings[]`),**不含**完整 detail。
 
 重要限制:
 
-- **DSS / WORKFLOW 按名查询**:若清单里同一 type+同一 name 出现在多个 folder,无法可靠区分,会被标记为 `ambiguous_input` 计入失败;且即使只选一个,组织内别的 folder 若有同名也无法保证(summary warning 会提示)。
-- **MTT 可按 folder 可靠消歧**(V3 定位 federated id),跨 folder 同名没问题。
+- **DSS / WORKFLOW 按名查询**:detail 层没有 folder identity,组织内别的 folder 若有同名也无法消歧(summary warning 会提示)。去重键为 `(type, name)`。
+- **MTT 可按 folder 可靠消歧**(V3 定位 federated id),跨 folder 同名没问题。去重键为 `(type, folder, name)`——MTT 同名只要 folder 不同就作为不同 task 保留。
 - 单个 task 失败不中断整批;只有整个输入 JSON 非法才会整体失败(exit 1)。
 
 > Mode A(Claude Code):可以从 Excel / CSV / Markdown 表格 / 粘贴文本整理出上面的 JSON 再调用;但 Python 正式入口**只接受 JSON**。最终统计以 summary 为准。
@@ -487,7 +488,7 @@ python smoke_test.py
 - **同名 task 跨文件夹无法可靠区分**：务必带 `--folder`。
 - **MTT / WORKFLOW 的 runtime / connection 字段结构未深度验证**：v0.1 主要在 DSS 上做了完整字段验证。
 - **Token 不会自动刷新**：过期后需要重新从浏览器手动获取。
-- **Excel 每类型独立 schema**：DSS 11 列、MTT 22 列、WORKFLOW 9 列 + `Export Errors`；`--type ALL` 输出 `MTT Task` / `DSS Tasks` / `Workflow Tasks` 三张业务表。MTT/WORKFLOW 可展开多行，`task_count` 与 `rows` 分离。
+- **Excel 每类型独立 schema**：DSS 11 列、MTT 22 列、WORKFLOW 8 列（Amendment 8）+ `Export Errors`；`--type ALL` 输出 `MTT Task` / `DSS Tasks` / `Workflow Tasks` 三张业务表。MTT/WORKFLOW 可展开多行，`task_count` 与 `rows` 分离。
 
 ---
 
@@ -501,7 +502,7 @@ python smoke_test.py
 | `{"error":"IICS_SESSION_TOKEN 未设置"}`，退出码 1 | 环境变量没设，或在新开的窗口里 | 重新 `$env:IICS_SESSION_TOKEN = "..."` |
 | 报 `RuntimeError: IICS session expired...` | Token 过期（401） | 浏览器重新取 `USER_SESSION` 再设置一遍 |
 | `list-tasks` 返回 `{"error":...}` | 文件夹名拼错 | 核对是否为三个 `JAPAN_*` 之一 |
-| `get-task` 结果好像不是预期的那个 task | 同名 task 跨文件夹歧义 | 加上 `--folder` |
+| `get-task` 结果好像不是预期的那个 task | 同名 task 跨文件夹歧义 | **MTT** 加上 `--folder`（用 federated ID 可靠区分）。**DSS / WORKFLOW** 只按 name 解析、不支持 `--folder`——组织内同名无法区分（已知限制） |
 | Excel 打不开 / 缺 sheet | `openpyxl` 没装好或写盘失败 | 重新 `py -m pip install -r requirements.txt`，检查目录写权限 |
 | Claude Code 启动命令报语法错误 | 在 PowerShell 里用了反斜杠 `\` 续行 | PowerShell 用反引号 `` ` ``，反斜杠续行只在 Bash/WSL 下有效 |
 | stdout 里混进了非 JSON 内容 | 不应该发生，属于缺陷 | 反馈给开发者，附带完整命令和输出 |

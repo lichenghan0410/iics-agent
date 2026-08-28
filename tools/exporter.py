@@ -46,11 +46,11 @@ DSS_HEADERS = [
 
 _EXPORT_ERROR_HEADERS = ["level", "task_name", "task_type", "folder", "error_type", "error"]
 
-# WORKFLOW 专用 Task Summary 列（Amendment 5）——独立 9 列 schema，
-# 命名风格（Task Type / folder / ...）与通用列有意不同，不与 MTT/DSS 对齐。
+# WORKFLOW 专用 Task Summary 列（Amendment 5；Amendment 8 起去 folder → 8 列）——
+# 命名风格（Task Type / orgId / ...）与通用列有意不同，不与 MTT/DSS 对齐。
+# folder 移除原因：WORKFLOW by-name detail 无可靠 folder identity，folder 仅是枚举范围。
 WORKFLOW_HEADERS = [
     "Task Type",
-    "folder",
     "orgId",
     "id",
     "Task Name",
@@ -219,10 +219,11 @@ def build_task_summary_rows(rec: dict, top_folder: str = "") -> list:
     return out
 
 
-def build_workflow_summary_rows(rec: dict, folder_path: str) -> list:
-    """WORKFLOW 记录 → 若干 9 列 row dict（一个 raw.tasks[] child = 一行）。
+def build_workflow_summary_rows(rec: dict) -> list:
+    """WORKFLOW 记录 → 若干 8 列 row dict（一个 raw.tasks[] child = 一行）。
 
-    - 父字段权威来源为 workflow V2 payload（rec["raw"]）；folder 来自 export 的 folder_path。
+    - 父字段权威来源为 workflow V2 payload（rec["raw"]）。
+    - Amendment 8：WORKFLOW by-name detail 无可靠 folder identity，不再输出 folder 列。
     - tasks 为空/缺失/非 list → 保留 1 行，child 三列为 ""。
     - child 字段缺失 → ""（非 failed / 非 enrichment failure）。
     - 不查询任何 child detail（只读 raw.tasks[]）。
@@ -230,7 +231,6 @@ def build_workflow_summary_rows(rec: dict, folder_path: str) -> list:
     raw = rec.get("raw") if isinstance(rec.get("raw"), dict) else {}
     parent = {
         "Task Type": "WORKFLOW",
-        "folder": folder_path or rec.get("folder") or rec.get("task_location") or "",
         "orgId": raw.get("orgId", ""),
         "id": raw.get("id", ""),
         "Task Name": raw.get("name") or rec.get("name") or rec.get("task_name") or "",
@@ -367,8 +367,8 @@ def export_results(
 ) -> dict:
     """导出为 Excel（Task Summary + Export Errors）/ JSON。client 未使用，保留契约。
 
-    export_type == "WORKFLOW" 时 Task Summary 使用 9 列 WORKFLOW 专用 schema（child 展开）；
-    其它（含 ALL / DSS / MTT）沿用通用列 schema，行为不变。
+    export_type == "WORKFLOW" 时 Task Summary 使用 8 列 WORKFLOW 专用 schema（child 展开，
+    Amendment 8 起无 folder 列）；其它（含 ALL / DSS / MTT）沿用各自 schema，行为不变。
     """
     try:
         if format not in ("excel", "json"):
@@ -414,7 +414,7 @@ def export_results(
         def _wf_rows(recs):
             out = []
             for rec in recs:
-                out.extend(build_workflow_summary_rows(rec, top_folder))
+                out.extend(build_workflow_summary_rows(rec))
             return out
 
         # business_sheets: [(sheet_title, headers, rows)]
@@ -424,7 +424,7 @@ def export_results(
             business_sheets = [("Task Summary", DSS_HEADERS, _dss_rows(records))]
         elif export_type == "ALL":
             # ALL（Amendment 7）：三个独立业务 sheet，固定顺序
-            # MTT Task(22) → DSS Tasks(11) → Workflow Tasks(9)，再 Export Errors
+            # MTT Task(22) → DSS Tasks(11) → Workflow Tasks(8)，再 Export Errors
             mtt_recs = [r for r in records if _is_mtt(r)]
             dss_recs = [r for r in records if _is_dss(r)]
             wf_recs = [r for r in records if _is_wf(r)]

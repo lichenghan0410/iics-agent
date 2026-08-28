@@ -273,6 +273,12 @@ tasks = [
 组织内其它 folder 若存在同名 DSS/WORKFLOW，仍无法保证取到 selected folder 的那个（summary
 warning 提示，属固有风险，未扫描全组织）。MTT 经 folder discovery + federated id 无此问题。
 
+> **Amendment 8 明确 folder 语义**：DSS / WORKFLOW 的 detail 层**无可靠 folder identity**，
+> folder 仅是 `list-tasks` / `export` 的**枚举范围**，不是详情身份。因此 `get-task DSS|WORKFLOW`
+> 与 selected 输入**不接受 folder**（非空即 `UnsupportedArgumentError` / `SelectedTaskInputError`，
+> 发 HTTP 之前失败），normalized detail 不含合成 `folder` 键。dedup 键 DSS/WORKFLOW=`(type,name)`、
+> MTT=`(type,folder,name)`。只有 **MTT** 的 folder 是真实身份数据（V3 discovery → federated id）。
+
 ---
 
 ## 8. 对 ADR-001「v2 前需重新确认项」的结论
@@ -293,5 +299,6 @@ warning 提示，属固有风险，未扫描全组织）。MTT 经 folder discov
 - MTT / WORKFLOW 详情的 runtime 与 connection 字段结构（v0.1 仅深度验证 DSS）。
 - V3 `q` 是否支持 `tag` / `updateTime` 过滤（KB 提及，未验证）。
 - 跨文件夹同名 task：**MTT 已解决**（V3 federated id → `mttask/frs/{id}`，见 §7.0）；
-  **DSS / WORKFLOW 仍未解决**（federated → V2 by-id 返回 500，继续 by-name）。
+  **DSS / WORKFLOW 仍未解决**（federated → V2 by-id 返回 500，继续 by-name）。Amendment 8 起
+  明确 DSS/WORKFLOW folder 非详情身份、不接受 folder 输入（见 §7.6 注）。
 - 写操作（update/batch）的 PARTIAL UPDATE 行为——v0.1 严格只读，未触碰。

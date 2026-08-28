@@ -527,7 +527,7 @@ Session token:
 
 使用示例（Mode A 下由 Claude Code CLI 自动生成；Mode C 下由运维人员手动输入，命令完全一致）:
   python iics_cli.py list-tasks JAPAN_SCRM_DI --type DSS
-  python iics_cli.py get-task DI_FACT_SALES_DAILY DSS --folder JAPAN_SCRM_DI
+  python iics_cli.py get-task DI_FACT_SALES_DAILY DSS   # Amendment 8：DSS/WORKFLOW 不带 --folder
   python iics_cli.py resolve-connection 000LVU0B000000000015
   python iics_cli.py export JAPAN_COMMERCIAL_DWH --type DSS
 """
@@ -1050,6 +1050,11 @@ DSS/WORKFLOW route、workbook 结构（`Task Summary` + `Export Errors`，不新
 
 ## Amendment 5 — WORKFLOW Child Task Export
 
+> **⚠️ 部分已被 Amendment 8 supersede**：本节步骤 3/4 的 WORKFLOW **9 列（含 `folder`，取自
+> export 的 `folder_path`）** 已改为 **8 列（去 `folder`）**——`build_workflow_summary_rows(rec)`
+> 去 `folder_path` 参数与父 `folder` 字段。WORKFLOW child 展开 / count / route / get-task 均不变。
+> 以 Amendment 8 为准。
+
 **性质**：v0.1 只读边界内的改进，仅针对 `export <FOLDER> --type WORKFLOW --format excel`。
 MTT / DSS 的查询与导出契约、WORKFLOW 的 `get-task` 与 detail route 均不变。
 
@@ -1084,8 +1089,9 @@ Amendment 3/4 正文「DSS / WORKFLOW：1 task = 1 行」仅适用于**通用列
 - **`Task Summary`**（通用 22 列）：DSS + MTT 行；**ALL 下 WORKFLOW 不进此表**。
 - **`Workflow Tasks`**（WORKFLOW 专用 9 列，child 展开）：ALL 中的 WORKFLOW 记录；无 WORKFLOW 时不生成。
 
-> **⚠️ 已被 Amendment 7 supersede**：ALL 现改为三张独立业务 sheet
-> `MTT Task`(22) → `DSS Tasks`(11) → `Workflow Tasks`(9) → `Export Errors`（DSS 不再与 MTT 同表）。
+> **⚠️ 已被 Amendment 7 / 8 supersede**：ALL 现改为三张独立业务 sheet
+> `MTT Task`(22) → `DSS Tasks`(11) → `Workflow Tasks`(8，Amendment 8 去 folder) → `Export Errors`
+> （DSS 不再与 MTT 同表）。
 - **`Export Errors`**：不变。
 - `rows` = 两张业务表物理数据行数之和；`task_count == list_tasks.count`。
 
@@ -1103,6 +1109,12 @@ Amendment 3/4 正文「DSS / WORKFLOW：1 task = 1 行」仅适用于**通用列
 ---
 
 ## Amendment 6 — Selected Task List Export
+
+> **⚠️ 部分已被 Amendment 8 supersede**：本节步骤 2/3/4 的「所有类型输入 `{name,type,folder}`」、
+> exact-tuple 去重键 `(type,folder,name)`、DSS/WORKFLOW `ambiguous_input` 分支——均已由
+> Amendment 8 修正：folder 仅 MTT；去重键按类型（DSS/WORKFLOW=`(type,name)`）；`ambiguous_input` /
+> `detect_input_ambiguities` 已删除；by-name 风险 warning 改新措辞。MTT discovery / 缓存 / 三 workbook /
+> summary 语义不变。以 Amendment 8 为准。
 
 **性质**：v0.1 只读边界内的 integration feature。新增确定性 selected-task **orchestration**
 层，复用现有 DSS/MTT/WORKFLOW 详情、exporter、缓存；不新增写操作、不改现有子命令语义、
@@ -1158,6 +1170,10 @@ Amendment 3/4 正文「DSS / WORKFLOW：1 task = 1 行」仅适用于**通用列
 
 ## Amendment 7 — DSS Dedicated Export Schema
 
+> **⚠️ 部分已被 Amendment 8 supersede**：本节所有 `Workflow Tasks(9)` / `WORKFLOW 9 列` 均改为
+> **8 列（去 folder）**（ALL 顺序变为 `MTT Task`(22) → `DSS Tasks`(11) → `Workflow Tasks`(8) →
+> `Export Errors`）。DSS 11 列 schema 本身不变。以 Amendment 8 为准。
+
 **性质**：export/schema + CLI presentation change，**不改查询层**。不新增 API、不新增写操作、
 不改 DSS detail route。
 
@@ -1210,3 +1226,93 @@ dict 复用、DSS-only workbook、MTT/WORKFLOW 单类型回归、ALL 三表结�
 DSS compact/full、MTT/WORKFLOW get-task 回归、selected DSS 11 列、connection 失败保留行。
 
 *相关提交：本次（`feat: add dedicated DSS export schema`）。*
+
+## Amendment 8 — DSS / WORKFLOW Folder Semantics Cleanup
+
+**性质**：CLI / 输入契约清理 + schema 修正。**不新增 API、不改 detail route、不重写 exporter、
+不涉及写操作。**
+
+**核心原则**：**「folder 作为枚举范围」≠「folder 作为详情身份」**。
+- **MTT**：folder 是真实身份 / discovery 数据（V3 folder 枚举取 federated id → FRS）——**不变**。
+- **DSS / WORKFLOW**：detail 按 name 解析（`dsstask/name/{name}` / `workflow/name/{name}`），
+  detail 层**无可靠 folder identity**，不得从用户输入伪造或模拟。
+
+### 变更点
+
+1. **`get-task DSS` / `get-task WORKFLOW` 不再接受 `--folder`**：传入非空 `--folder` → 结构化
+   `UnsupportedArgumentError`（**先于任何 HTTP**，exit 1）。DSS 文案：
+   `--folder is not supported for DSS get-task because DSS details are resolved by name only.`
+   （WORKFLOW 同构。）**MTT `--folder` 仍必需**，缺失 → `MissingFolderError`（不变）。
+2. **`get_task_detail()` 亦拒绝**：`task_type in ("DSS","WORKFLOW")` 且 `folder_path` trim 后非空
+   → `UnsupportedArgumentError`、不发 HTTP。`folder_path == "" / None / 纯空白` = 视为未提供。
+   MTT folder 行为完全不变。
+3. **DSS / WORKFLOW normalized detail 不含合成 `folder` 键**（默认 `"folder" not in detail`；
+   不用 `folder=""` / `folder=null` 代替）。MTT 保留 `task_location` / `federated_id` 等。
+4. **普通 `export <folder> --type DSS|WORKFLOW`**：folder 仍作 `list_tasks()` 枚举范围，但**不再**
+   把 `folder_path=args.folder` 传给 `get_task_detail()`（只传 name/type）。MTT 保留 folder /
+   federated-id 流程。
+5. **`export-selected` 输入 schema 按类型区分**：MTT `{name,type,folder}`（folder 键必须存在、
+   字符串、trim 后非空，否则 `SelectedTaskInputError`）；DSS / WORKFLOW `{name,type}`。
+6. **DSS / WORKFLOW 兼容**：`folder:""` 或纯空白 → 归一化丢弃 key；`folder:"非空"` → **快速失败**
+   `SelectedTaskInputError`（`folder is only supported for MTT selected tasks`），0 次 API、0 workbook、
+   exit 1。校验全部先于任何 IICS API。
+7. **归一化 selected item**：MTT 保留 folder；DSS / WORKFLOW 完全丢弃 folder（非 `folder=""`）。
+8. **去重键按类型**：MTT `(type, folder, name)`；DSS / WORKFLOW `(type, name)`（helper
+   `_selection_identity(item)`）。保序、保 first-occurrence；`input_count` / `unique_count` /
+   `duplicates_removed` 语义不变。MTT 跨 folder 同名**永不**被去重。
+9. **删除 `detect_input_ambiguities()`** 及全部 `ambiguous_input` 逻辑 / 分支 / 文案 / 测试（无死
+   兼容路径）。
+10. **保留 org 级重名警告，但换新措辞**：DSS →
+    `DSS details are resolved by name only; folder identity is unavailable and duplicate names
+    elsewhere in the organization cannot be disambiguated.`（WORKFLOW 同构）。旧措辞
+    "folder identity cannot be guaranteed" 已废弃；亦不使用 "folder identity may be inaccurate"。
+11. **selected DSS / WORKFLOW 查询**：`get_task_detail(client, task_name=…, task_type="DSS"|"WORKFLOW")`
+    —— 无 `folder_path`。失败对象：DSS / WORKFLOW `{type, name, error_type, error}`（**无 folder**）；
+    MTT 保留 folder。
+12. **`WORKFLOW_HEADERS` 9 → 8 列**（去 `folder`）：`Task Type, orgId, id, Task Name, updateTime,
+    tasks.taskId, tasks.type, tasks.name`。`build_workflow_summary_rows(rec)`（去 `folder_path` 参数
+    与父 `folder` 字段）；child 展开 / 零 child / fallback 逻辑不变。WORKFLOW workbook 处处 8 列
+    （单类型、ALL 的 Workflow Tasks、selected_WORKFLOW）。ALL sheet 顺序不变：
+    `MTT Task`(22) → `DSS Tasks`(11) → `Workflow Tasks`(8) → `Export Errors`。
+13. **`Export Errors.folder` 表头保留**，但**值按类型**：MTT error folder = MTT 身份 / discovery
+    folder；DSS / WORKFLOW error folder = `""`。修正发生在**源头**（`iics_cli._cmd_export`：
+    `"folder": args.folder if ttype == "MTT" else ""`），非 exporter fallback。普通
+    `export --type WORKFLOW|DSS` 的 detail 失败行 `Export Errors.folder` 仍为 `""`（即使枚举用了
+    folder）。`_EXPORT_ERROR_HEADERS` 的 `folder` 列保留（MTT 仍需要）。
+
+> **关于 `exporter.py` 第 348 行（`_collect_enrichment_warnings` 的 folder 归属逻辑
+> `ew.setdefault("folder", rec.get("task_location") or rec.get("folder", ""))`）：未修改**，其符合本
+> Amendment 要求，是实现要求 3（DSS/WORKFLOW detail 不再含合成 folder）完成后的**自动结果**，而非遗漏项——
+> DSS/WORKFLOW rec 既无 `task_location` 亦无 `folder`，故自然归为 `""`；MTT rec 有 `task_location`。
+
+### 对正文旧契约的反向修正（supersede）
+
+- **Amendment 2 / 3「DSS / WORKFLOW 保持 by-name；跨 folder 同名是已知限制」**：本 Amendment 明确
+  DSS / WORKFLOW detail 层 folder identity **不可用**，`--folder` / selected folder 非空即拒；不再以
+  "已知限制" 形式默默接受用户 folder。
+- **Amendment 5「WORKFLOW Excel 独立 9 列（含 folder，取自 export 的 `<FOLDER>`）」** →
+  **8 列、无 folder**（`build_workflow_summary_rows` 去 `folder_path`）。
+- **Amendment 6「selected 输入 `{name,type,folder}`（所有类型）、`(type,folder,name)` 去重、
+  ambiguous_input 分支、"folder identity cannot be guaranteed" 警告」** → folder 仅 MTT；
+  去重键 `_selection_identity` 按类型；删 `detect_input_ambiguities`；警告改新措辞。
+- **Amendment 7 ALL 顺序 `Workflow Tasks(9)`** → `Workflow Tasks(8)`。
+
+### 未改动（回归保证）
+
+DSS route `dsstask/name/{name}`、WORKFLOW route `workflow/name/{name}`、MTT FRS 路由与
+folder/federated 流程、MTT `MTT_HEADERS`(22)、`DSS_HEADERS`(11)、DSS `1 task=1 row`、WORKFLOW child
+展开 / 零 child / fallback 与 `max(1,len)` count、`compact_record` / `build_dss_summary_rows` /
+`build_task_summary_rows`、enrichment warning 分级、缓存契约、`get-task WORKFLOW` 扁平输出、
+DSS get-task compact/full——全部不变。
+
+### 已验证
+
+fake 测试 A–Z（37 断言，全 fake、无真实 IICS）：DSS/WF 非空 folder 拒绝（CLI 与 Python 层、不发 HTTP、
+文案）、DSS/WF `folder=""`/空白视为未提供、detail 无合成 folder、MTT folder identity 保留、
+`WORKFLOW_HEADERS` 8 列、`build_workflow_summary_rows(rec)` 单参无 folder、零 child、selected 校验
+type-conditional（MTT 必需 folder / DSS/WF 缺省 / 空白丢弃 / 非空拒绝）、`_selection_identity`、
+type-dependent dedup（6→4、MTT 跨 folder 同名保留）、`detect_input_ambiguities` 已删、`_process_by_name`
+不传 folder_path、warning 新措辞、DSS/WF 失败对象无 folder、WORKFLOW/ALL Excel round-trip 8 列与
+sheet 顺序、`_cmd_export` Export Errors folder 按类型（DSS=""/MTT=folder）、MTT selected 失败保留 folder。
+
+*相关提交：本次（`fix: clarify DSS and workflow folder semantics`）。*

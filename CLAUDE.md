@@ -109,12 +109,43 @@ python iics_cli.py export-selected --input <selected_tasks.json> --output-dir <d
   DSS / WORKFLOW `{name, type}`（**无 folder**）。DSS/WORKFLOW 的 `folder:""`/纯空白 → 归一化丢弃；
   `folder:"非空"` → `SelectedTaskInputError` 快速失败（0 API、0 workbook、exit 1）。
 - 去重键按类型：MTT `(type, folder, name)`、DSS/WORKFLOW `(type, name)`；MTT 跨 folder 同名永不去重。
-- **Mode A 构造 selected JSON 规则（Amendment 8）**：
-  - MTT：必须带 folder。
-  - DSS / WORKFLOW：用户未给 folder 或给空白 → JSON 里**不写** folder key。
-  - DSS / WORKFLOW：用户**明确给了非空 folder** → **原样转写进 JSON，不得静默过滤/忽略**，交由
-    Python 校验快速失败（`SelectedTaskInputError`），再据 summary 向用户解释「DSS/WORKFLOW 按 name
-    解析、不支持 folder」。静默吞掉非空 folder 是被禁止的。
+## Mode A 构造 selected JSON 规则（Amendment 8）
+
+用户提供的原始 List 可能对所有 task type（含 DSS/WORKFLOW）都填写了 folder 列。
+
+Mode A **不得机械地把原始表格每一列原样复制到 JSON**，必须按 task type 转换为 Python
+正式输入 schema：
+
+- **MTT**：folder 是真实定位/消歧参数，必须保留：
+  `{"name": "MTT_A", "type": "MTT", "folder": "Folder_A"}`
+  若 MTT 缺少 folder 或 folder 为空：不得调用 export-selected，向用户报告该 MTT 缺少
+  必需的 folder 信息。
+
+- **DSS / WORKFLOW**：使用 V2 by-name 查询，folder 不属于 detail identity。即使原始行
+  填写了 folder，生成 JSON 时也必须删除该字段：
+  `{"name": "DSS_A", "type": "DSS"}` / `{"name": "WF_A", "type": "WORKFLOW"}`
+  不得写入 folder key（无论值是否为空）。
+
+执行顺序：
+
+```text
+1. 读取所有行，trim name/type/folder
+2. type 标准化为 DSS / MTT / WORKFLOW
+3. MTT：保留 folder；缺失/空 → 停止，报告给用户
+4. DSS / WORKFLOW：删除 folder（不判断是否非空，一律删除）
+5. 一次性生成 selected_tasks.json
+6. 调用 export-selected
+7. 读取 stdout summary
+8. 向用户报告结果
+```
+
+**用户沟通**：只要原始 List 中存在任何 DSS/WORKFLOW 行填写了非空
+folder，最终报告中**必须**包含类似说明：
+
+> "DSS / WORKFLOW 使用 by-name 查询，因此原始 List 中这些类型填写的 folder 不参与
+> detail identity；本次 selected JSON 已按正式 schema 自动忽略这些字段，同名对象
+> 跨 folder 的歧义风险仍无法被消除（详见 warnings）。"
+
 - **get-task 同理**：DSS/WORKFLOW 不要向用户索要 folder、也不要自行补 `--folder`；MTT 仍需 folder。
 - **不**逐条 `get-task` 把完整 detail 搬进 LLM 上下文；**不**自己生成 Excel；**不**自行统计
   success/failed —— 最终数量、失败、文件路径**以 Python summary（stdout JSON）为准**。

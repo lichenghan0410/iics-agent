@@ -252,7 +252,7 @@ python iics_cli.py get-task <task_name> <task_type> [--folder PATH] [--no-resolv
 |------|------|------|
 | `<task_name>` | 是 | task 名称 |
 | `<task_type>` | 是 | `DSS` / `MTT` / `WORKFLOW` |
-| `--folder` | **仅 MTT 必填** | MTT 用于定位 federated ID。**DSS / WORKFLOW 不支持**（传非空会报 `UnsupportedArgumentError`，Amendment 8） |
+| `--folder` | **仅 MTT 必填** | MTT 用于定位 FRS ID。**DSS / WORKFLOW 不支持**（传非空会报 `UnsupportedArgumentError`，Amendment 8） |
 | `--no-resolve` | 否 | 跳过 connection ID → 名称解析，只看 ID |
 
 示例：
@@ -276,9 +276,9 @@ python iics_cli.py get-task DI_FACT_SALES_DAILY DSS
 
 > **DSS `get-task` 默认 compact**（与 DSS Excel 11 列一致）：返回 `{task_count:1, rows:1, records:[{11 字段}]}`；`--full` 才返回上面的完整 detail。上方 JSON 是 `--full` 的形态。`runtime_environment.name` 对 DSS 恒为空（DSS 详情接口不返回该字段，平台限制，非 bug）。
 >
-> **MTT 详情已增强**：MTT 走官方 FRS 路径，返回结构与 DSS/WORKFLOW 不同——顶层含 `id`（classic V2 ID）、`federated_id`（V3/FRS ID）、`detail_route`、`runtime_environment{id,name}`、`task_mapping{id,name,location,updated_on}`（`location` 当前为空）、`transformations[]`（仅来自 MTT parameters）、`enrichment_warnings[]`。
+> **MTT 详情已增强**：MTT 走官方 FRS 路径，返回结构与 DSS/WORKFLOW 不同——顶层含 `id`（classic V2 ID）、`frs_id`（V3/FRS ID）、`detail_route`、`runtime_environment{id,name}`、`task_mapping{id,name,location,updated_on}`（`location` 当前为空）、`transformations[]`（仅来自 MTT parameters）、`enrichment_warnings[]`。
 >
-> **MTT 查询必须同时提供 task name 和 `--folder`**：系统会先在指定 folder 中定位该 task 的 federated ID，再通过官方 FRS detail 接口获取详情。这样彻底避免了 MTT 的跨文件夹同名歧义。示例：
+> **MTT 查询必须同时提供 task name 和 `--folder`**：系统会先在指定 folder 中定位该 task 的 FRS ID，再通过官方 FRS detail 接口获取详情。这样彻底避免了 MTT 的跨文件夹同名歧义。示例：
 >
 > ```powershell
 > python .\iics_cli.py get-task TASK_NAME MTT --folder JAPAN_SCRM_BAU
@@ -293,7 +293,7 @@ python .\iics_cli.py get-task TASK_NAME MTT --folder JAPAN_SCRM_BAU
 # → {"task_count": 1, "rows": 2, "records": [ {业务字段…}, … ]}
 ```
 
-需要完整内部结构（`raw` / `federated_id` / `transformations` 等，调试/分析用）时加 `--full`：
+需要完整内部结构（`raw` / `frs_id` / `transformations` 等，调试/分析用）时加 `--full`：
 
 ```powershell
 python .\iics_cli.py get-task TASK_NAME MTT --folder JAPAN_SCRM_BAU --full
@@ -419,7 +419,7 @@ python .\iics_cli.py export-selected --input .\selected_tasks.json --output-dir 
 重要限制:
 
 - **DSS / WORKFLOW 按名查询**:detail 层没有 folder identity,组织内别的 folder 若有同名也无法消歧(summary warning 会提示)。去重键为 `(type, name)`。
-- **MTT 可按 folder 可靠消歧**(V3 定位 federated id),跨 folder 同名没问题。去重键为 `(type, folder, name)`——MTT 同名只要 folder 不同就作为不同 task 保留。
+- **MTT 可按 folder 可靠消歧**(V3 定位 FRS object ID),跨 folder 同名没问题。去重键为 `(type, folder, name)`——MTT 同名只要 folder 不同就作为不同 task 保留。
 - 单个 task 失败不中断整批;只有整个输入 JSON 非法才会整体失败(exit 1)。
 
 > Mode A(Claude Code):可以从 Excel / CSV / Markdown 表格 / 粘贴文本整理出上面的 JSON 再调用;但 Python 正式入口**只接受 JSON**。最终统计以 summary 为准。
@@ -502,7 +502,7 @@ python smoke_test.py
 | `{"error":"IICS_SESSION_TOKEN 未设置"}`，退出码 1 | 环境变量没设，或在新开的窗口里 | 重新 `$env:IICS_SESSION_TOKEN = "..."` |
 | 报 `RuntimeError: IICS session expired...` | Token 过期（401） | 浏览器重新取 `USER_SESSION` 再设置一遍 |
 | `list-tasks` 返回 `{"error":...}` | 文件夹名拼错 | 核对是否为三个 `JAPAN_*` 之一 |
-| `get-task` 结果好像不是预期的那个 task | 同名 task 跨文件夹歧义 | **MTT** 加上 `--folder`（用 federated ID 可靠区分）。**DSS / WORKFLOW** 只按 name 解析、不支持 `--folder`——组织内同名无法区分（已知限制） |
+| `get-task` 结果好像不是预期的那个 task | 同名 task 跨文件夹歧义 | **MTT** 加上 `--folder`（用 FRS ID 可靠区分）。**DSS / WORKFLOW** 只按 name 解析、不支持 `--folder`——组织内同名无法区分（已知限制） |
 | Excel 打不开 / 缺 sheet | `openpyxl` 没装好或写盘失败 | 重新 `py -m pip install -r requirements.txt`，检查目录写权限 |
 | Claude Code 启动命令报语法错误 | 在 PowerShell 里用了反斜杠 `\` 续行 | PowerShell 用反引号 `` ` ``，反斜杠续行只在 Bash/WSL 下有效 |
 | stdout 里混进了非 JSON 内容 | 不应该发生，属于缺陷 | 反馈给开发者，附带完整命令和输出 |

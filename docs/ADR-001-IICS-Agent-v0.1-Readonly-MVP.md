@@ -217,8 +217,8 @@ IICS 有两套 API，行为差异显著：
 - `list_tasks` → `_request("GET", "public/core/v3/objects", use_v3=True, params={"q": f'location=="{folder}"', "pageSize": n, "skip": skip})` (V3)
 - `get_task_detail` → 按 `task_type` 路由（`use_v3=False`，path 不含 `saas/api/v2` 前缀）：
   - **DSS / WORKFLOW**：V2 by-name（`dsstask/name/<name>` / `workflow/name/<name>`），行为不变。
-  - **MTT（Amendment 2）**：先 V3 folder 枚举取 **federated / FRS id**，再 `mttask/frs/{federated_id}`
-    （官方文档明确支持、只接受 federated id）。彻底解决 MTT 跨 folder 同名歧义。详见文末 Amendment 2。
+  - **MTT（Amendment 2）**：先 V3 folder 枚举取 **FRS object ID**，再 `mttask/frs/{frs_id}`
+    （官方文档明确支持、只接受 FRS object ID）。彻底解决 MTT 跨 folder 同名歧义。详见文末 Amendment 2。
 - `resolve_connection` → `_request("GET", f"connection/{id}", use_v3=False)` (V2)
 
 这两个 Header 由 `_request(use_v3=True/False)` 自动注入，工具层无需手动指定。
@@ -389,8 +389,8 @@ def get_task_detail(
     task_name: str = "",
     task_type: str = "",       # "DSS" | "MTT" | "WORKFLOW"
     folder_path: str = "",     # MTT 必需；DSS/WORKFLOW 记录用
-    task_id: str = "",         # 仅 MTT：federated id 直取（供 export 内部复用）
-    task_id_type: str = "",    # 仅 MTT：必须显式 "federated"
+    task_id: str = "",         # 仅 MTT：FRS object ID 直取（供 export 内部复用）
+    task_id_type: str = "",    # 仅 MTT：必须显式 "frs"
     resolve_connections: bool = True,
 ) -> dict:
     """
@@ -399,7 +399,7 @@ def get_task_detail(
         "@type": "mtTask",
         "id": "000LVU0Z000000006IMR",     # MTT: classic V2 id（来自 FRS payload）
         "orgId": "000LVU",
-        "federated_id": "fABfm4RCYqVfuVEi9e8BGb",  # V3/FRS id（用于 FRS 请求）
+        "frs_id": "fABfm4RCYqVfuVEi9e8BGb",  # V3/FRS id（用于 FRS 请求）
         "detail_route": "v2-mttask-frs",
         "task_name": "...", "task_type": "MTT", "task_location": "...",
         "task_updated_on": "...",
@@ -412,13 +412,13 @@ def get_task_detail(
         "raw": { <完整 API 响应> }
     }
     # DSS / WORKFLOW 仍为旧结构（name/type/folder/runtime_environment/source_connection/…/raw）
-    # 注：已删除误导性的 id_type；顶层 id 即 classic id，federated_id 单独字段。
+    # 注：已删除误导性的 id_type；顶层 id 即 classic id，frs_id 单独字段。
     实现要点（Amendment 2 / 3）:
-    - **MTT**：官方 FRS 路径 `mttask/frs/{federated_id}`（只接受 federated id）。
-        方式 A：name + folder → list_tasks(folder, MTT) 精确匹配取 federated id → FRS。
-        方式 B：task_id + task_id_type="federated"（跳过枚举，供 export 复用）。
+    - **MTT**：官方 FRS 路径 `mttask/frs/{frs_id}`（只接受 FRS object ID）。
+        方式 A：name + folder → list_tasks(folder, MTT) 精确匹配取 FRS object ID → FRS。
+        方式 B：task_id + task_id_type="frs"（跳过枚举，供 export 复用）。
         缺 folder → MissingFolderError；0 匹配 → TaskNotFoundError；多匹配 → AmbiguousTaskError
-        (candidates 仅含 id/path/type/name)；classic/缺失/非 federated 的 task_id_type → InvalidIdTypeError。
+        (candidates 仅含 id/path/type/name)；classic/缺失/非 FRS 的 task_id_type → InvalidIdTypeError。
         **不使用** `mttask/name/<name>`，也**不使用**裸 `mttask/{id}`。
     - **DSS / WORKFLOW**：保持 V2 by-name（`dsstask/name/<name>` / `workflow/name/<name>`），行为不变；
       不支持 task_id / task_id_type（传入 → UnsupportedArgumentError）。
@@ -549,7 +549,7 @@ Session token:
 2. 对每个 task 取详情（--summary-only 时跳过此步）：
    - DSS / WORKFLOW: get_task_detail(name, type, folder)             （V2 by-name）
    - MTT:            get_task_detail(task_type="MTT", task_id=task["id"],
-                                     task_id_type="federated")        （复用 federated id → FRS，
+                                     task_id_type="frs")        （复用 FRS object ID → FRS，
                      不传 name/folder 以免 ConflictingArgumentsError；返回后回填 name/folder）
 3. 聚合为 data = {"tasks": [...], "details": [...], "failed_details": [...]}
 4. export_results(data, format, filename)       → Excel / JSON 文件
@@ -713,7 +713,7 @@ if result_typed["count"] == 0:
 else:
     task_name = TEST_TASK or result_typed["tasks"][0]["name"]
 
-    # Test 4: get_task_detail（MTT 经 V3→federated→FRS；DSS/WORKFLOW by-name）
+    # Test 4: get_task_detail（MTT 经 V3→FRS object ID→FRS；DSS/WORKFLOW by-name）
     detail = get_task_detail(
         client, task_name=task_name, task_type=TEST_TYPE, folder_path=TEST_FOLDER,
     )
@@ -721,7 +721,7 @@ else:
     assert "runtime_environment" in detail
     if TEST_TYPE == "MTT":
         assert detail["detail_route"] == "v2-mttask-frs"
-        assert detail["federated_id"] and "id_type" not in detail
+        assert detail["frs_id"] and "id_type" not in detail
         assert detail["task_mapping"]["location"] is None
     # connection 断言按 task_type 区分（DSS 有稳定 source/target；MTT/WORKFLOW v0.1 返回 raw）
     if TEST_TYPE == "DSS":
@@ -895,38 +895,38 @@ API 契约（V3 端点、`skip` 分页、小写 `and`、V2 by-name 均不变）�
 
 ### 实测边界
 
-1. V3 objects 枚举返回的 id 是 **federated / FRS ID**（示例 `fABfm4RCYqVfuVEi9e8BGb`）。
-2. V2 classic ID（示例 `000LVU0I0000000004TZ`）与 federated ID 是**不同体系**。
-3. `GET /saas/api/v2/mttask/frs/{id}` **只接受 federated ID**（classic 传入失败）。
-4. 裸 `GET /saas/api/v2/mttask/{id}` 实测 federated 与 classic **均可返回**，但这是**未在官方文档
+1. V3 objects 枚举返回的 id 是 **FRS ID**（示例 `fABfm4RCYqVfuVEi9e8BGb`）。
+2. V2 classic ID（示例 `000LVU0I0000000004TZ`）与 FRS ID 是**不同体系**。
+3. `GET /saas/api/v2/mttask/frs/{id}` **只接受 FRS ID**（classic 传入失败）。
+4. 裸 `GET /saas/api/v2/mttask/{id}` 实测 FRS 与 classic **均可返回**，但这是**未在官方文档
    明确保证**的兼容行为，**不作为项目默认路径**。
-5. 项目强制采用：**V3 folder 枚举 → federated ID → V2 `mttask/frs/{federated_id}`**。
+5. 项目强制采用：**V3 folder 枚举 → FRS ID → V2 `mttask/frs/{frs_id}`**。
 
 ### 契约变更
 
 - `get_task_detail` 签名新增 `task_id` / `task_id_type`（**仅 MTT 使用**）：
   `get_task_detail(client, task_name="", task_type="", folder_path="", task_id="", task_id_type="", resolve_connections=True)`。
 - **MTT name 查询必须提供 folder**（缺 folder → `MissingFolderError`）；用户 CLI **不支持 MTT `--id`**。
-- **内部 task_id 调用必须显式** `task_id_type="federated"`（缺失/`classic`/其它 → `InvalidIdTypeError`，不发 HTTP）。
+- **内部 task_id 调用必须显式** `task_id_type="frs"`（缺失/`classic`/其它 → `InvalidIdTypeError`，不发 HTTP）。
   **不做** `task_id.startswith("000")` 之类字符串启发式判断，严格依赖显式契约。
 - **task_id 与 task_name/folder 不得同时出现**（→ `ConflictingArgumentsError`，不枚举、不发 HTTP）。
 - **DSS / WORKFLOW 不支持** `task_id` / `task_id_type`（传入 → `UnsupportedArgumentError`）；行为保持不变。
-- MTT 成功返回顶层 `id`（federated）/ `detail_route: "v2-mttask-frs"`。
-  **（注：此描述已被 Amendment 3 修正——顶层 `id` 实为 classic V2 ID，federated 拆为独立
-  `federated_id` 字段，`id_type` 已删除；详见 Amendment 3。）**
-- **export**：MTT 复用 list_tasks 已返回的 federated id，按 `task_id + task_id_type="federated"` 调 FRS，
+- MTT 成功返回顶层 `id`（FRS）/ `detail_route: "v2-mttask-frs"`。
+  **（注：此描述已被 Amendment 3 修正——顶层 `id` 实为 classic V2 ID，FRS 拆为独立
+  `frs_id` 字段，`id_type` 已删除；详见 Amendment 3。）**
+- **export**：MTT 复用 list_tasks 已返回的 FRS object ID，按 `task_id + task_id_type="frs"` 调 FRS，
   每 MTT 一次 `mttask/frs/{id}`、不重复枚举、不传 name/folder（返回后回填）；单条失败不中断整批。
 
 ### 已知限制（更新）
 
-- **MTT 跨 folder 同名歧义已解决**（FRS + folder 内 federated id 唯一）。
+- **MTT 跨 folder 同名歧义已解决**（FRS + folder 内 FRS object ID 唯一）。
 - **DSS / WORKFLOW 跨 folder 同名仍是已知限制**（继续走 by-name，MTT 特例不推广到这两类）。
 
 ### 已验证 / 待确认
 
-- MTT `mttask/frs/{federated_id}`：运维方实测报告可用（federated 成功 / classic 失败）。
-- DSS / WORKFLOW：实测将 V3 federated id 传入 `dsstask/{id}` / `workflow/{id}` 返回 **500**——
-  证明 federated→V2 by-id 是 **MTT 类型特例**，不得推广。详见 `docs/IICS_API_NOTES.md`。
+- MTT `mttask/frs/{frs_id}`：运维方实测报告可用（FRS 成功 / classic 失败）。
+- DSS / WORKFLOW：实测将 V3 FRS object ID 传入 `dsstask/{id}` / `workflow/{id}` 返回 **500**——
+  证明 FRS→V2 by-id 是 **MTT 类型特例**，不得推广。详见 `docs/IICS_API_NOTES.md`。
 - 本仓库对 MTT FRS 路由有 fake 测试（Test A–K）覆盖；真实字段级验证建议按 Runbook MTT 专项跑一次。
 
 *相关提交：`1de1f94`（`fix: resolve MTT details through FRS endpoint`）。*
@@ -949,8 +949,8 @@ API 契约（V3 端点、`skip` 分页、小写 `and`、V2 by-name 均不变）�
    取 name。**不使用 agentId** 冒充 Runtime Environment。
 4. **`runtime_agent` → `runtime_environment`**：公开 schema/export/测试/文档统一更名；结构为
    `{"id": <rtId or null>, "name": <resolved or null>}`。内部抽取函数改名 `extract_runtime_env_name`。
-5. **classic `id` 与 `federated_id` 分离**：MTT FRS payload 顶层 `id` 是 **classic V2 ID**；
-   V3/FRS 请求用的 id 记为 `federated_id`。**删除误导性的 `id_type`**。
+5. **classic `id` 与 `frs_id` 分离**：MTT FRS payload 顶层 `id` 是 **classic V2 ID**；
+   V3/FRS 请求用的 id 记为 `frs_id`。**删除误导性的 `id_type`**。
 6. **transformation 只来自 MTT `parameters[]`**：不使用 Mapping parameters；不取
    `parameters[0]`/`[-1]`/first_source/last_target；不按 Connection ID 去重。
 7. **MTT parameters 内联展开到 Task Summary**：每个有效 Source/Target parameter = 1 Excel 行，
@@ -973,9 +973,9 @@ API 契约（V3 端点、`skip` 分页、小写 `and`、V2 by-name 均不变）�
 
 ### 对正文旧契约的反向修正
 
-已在正文同步修正：`get_task_detail` 契约（id/federated_id/去除 id_type、runtime_environment、
+已在正文同步修正：`get_task_detail` 契约（id/frs_id/去除 id_type、runtime_environment、
 transformations 等）、`export_results` 契约（task_count/rows 分离、双 sheet）、Smoke Test 4、
-D-4/export 流程、Amendment 2 中 `id（federated）/id_type` 的描述均标注被本 Amendment 修正。
+D-4/export 流程、Amendment 2 中 `id（FRS）/id_type` 的描述均标注被本 Amendment 修正。
 
 ### Task Summary 列（22 列；**Amendment 7 起为 MTT 专属 `MTT_HEADERS`**）
 
@@ -989,7 +989,7 @@ Parameter File Directory, Parameter File Name, Pre-Processing Commands, Post-Pro
 
 ### 已验证 / 待确认
 
-- MTT `id`/`federated_id` 分离、runtime/mapping enrichment、parameters 展开、缓存、失败分级：
+- MTT `id`/`frs_id` 分离、runtime/mapping enrichment、parameters 展开、缓存、失败分级：
   本仓库 fake 测试 A–N 覆盖。
 - 真实字段级验证（`runtime_environment.id == raw.runtimeEnvironmentId`、Mapping Name 非空等）
   建议按 Runbook §6.3 用真实 MTT task 跑一次。
@@ -1014,7 +1014,7 @@ detail route 与行为完全不变。
    **（反向修正 Amendment 3 中「label → name」的旧优先级——正文 `_transformation_name` 契约以此为准。）**
 2. **`get-task MTT` 默认 compact 输出**：默认返回 `{task_count, rows, records[]}`，`records` 每条
    为与 Excel `Task Summary` 完全相同的业务字段（一个 transformation = 一条 record）；无有效
-   transformation 时 `rows=1`、一条 task-level 基础行。**compact 不含** raw / federated_id /
+   transformation 时 `rows=1`、一条 task-level 基础行。**compact 不含** raw / frs_id /
    detail_route / enrichment_warnings / connection·mapping·runtime ID。
 3. **新增 `--full`**：MTT 下 `--full` 返回 Amendment 3 的完整 normalized detail（诊断/API 分析用，
    只读）。仅 `task_type == MTT` 时按 `--full` 分支；DSS / WORKFLOW 保持现状（扁平 dict）。
@@ -1060,7 +1060,7 @@ MTT / DSS 的查询与导出契约、WORKFLOW 的 `get-task` 与 detail route �
 
 ### 变更点
 
-1. **WORKFLOW detail route 保持 `workflow/name/{name}`**（不改；不得用 V3 federated id 调 by-id）。
+1. **WORKFLOW detail route 保持 `workflow/name/{name}`**（不改；不得用 V3 FRS object ID 调 by-id）。
 2. **`raw.tasks[]` 是 WORKFLOW child row 的权威来源**；**一个 child task = 一个 Excel 行**。
 3. **父 workflow 字段逐行重复**：`Task Type`（恒 `WORKFLOW`）/ `folder`（来自 export 的
    `folder_path`，非 detail）/ `orgId` / `id`（workflow V2 classic id）/ `Task Name` / `updateTime`。
@@ -1135,7 +1135,7 @@ Amendment 3/4 正文「DSS / WORKFLOW：1 task = 1 行」仅适用于**通用列
 5. **MTT 每 folder 一次 V3 discovery**：按 folder 分组，每 unique folder 只调 `list_tasks(folder, MTT)`
    **一次**（函数级；folder 内 >200 时内部按 `skip` 分页属正常，见 IICS_API_NOTES §4），建
    `name → [candidates]` index；0→`selected_task_not_found`、>1→`ambiguous_mtt`（candidates
-   含 id/path/name/type）、1→取 federated id → 现有 FRS detail（`task_id_type="federated"`，
+   含 id/path/name/type）、1→取 FRS object ID → 现有 FRS detail（`task_id_type="frs"`，
    **不再** name+folder 二次 discovery）。MTT 跨 folder 同名由此正确区分（非 ambiguous_input）。
 6. **整个 batch 共用一个 `IICSClient`**：Connection/Mapping/Runtime process-local 缓存跨类型复用。
 7. **三个独立 workbook**：`selected_{DSS,MTT,WORKFLOW}_<同一 batch timestamp>.xlsx`，各调对应现有
@@ -1159,7 +1159,7 @@ Amendment 3/4 正文「DSS / WORKFLOW：1 task = 1 行」仅适用于**通用列
 
 ### 已验证 / 待确认
 
-- 校验/标准化/去重、DSS·WORKFLOW ambiguous_input、MTT 每 folder 一次 discovery + federated 直取、
+- 校验/标准化/去重、DSS·WORKFLOW ambiguous_input、MTT 每 folder 一次 discovery + FRS 直取、
   只导出 selected（不含 folder 其它对象）、三独立文件、counts、跨类型共享缓存（DSS↔MTT 两种顺序）、
   现有 export/get-task/ALL 无回归：fake 测试 A–X + U-1 + CLL 覆盖。
 - 本 feature **未解决** DSS/WORKFLOW org 级同名 ambiguity（by-name 固有风险，summary warning 提示）。
@@ -1233,7 +1233,7 @@ DSS compact/full、MTT/WORKFLOW get-task 回归、selected DSS 11 列、connecti
 不涉及写操作。**
 
 **核心原则**：**「folder 作为枚举范围」≠「folder 作为详情身份」**。
-- **MTT**：folder 是真实身份 / discovery 数据（V3 folder 枚举取 federated id → FRS）——**不变**。
+- **MTT**：folder 是真实身份 / discovery 数据（V3 folder 枚举取 FRS object ID → FRS）——**不变**。
 - **DSS / WORKFLOW**：detail 按 name 解析（`dsstask/name/{name}` / `workflow/name/{name}`），
   detail 层**无可靠 folder identity**，不得从用户输入伪造或模拟。
 
@@ -1247,10 +1247,10 @@ DSS compact/full、MTT/WORKFLOW get-task 回归、selected DSS 11 列、connecti
    → `UnsupportedArgumentError`、不发 HTTP。`folder_path == "" / None / 纯空白` = 视为未提供。
    MTT folder 行为完全不变。
 3. **DSS / WORKFLOW normalized detail 不含合成 `folder` 键**（默认 `"folder" not in detail`；
-   不用 `folder=""` / `folder=null` 代替）。MTT 保留 `task_location` / `federated_id` 等。
+   不用 `folder=""` / `folder=null` 代替）。MTT 保留 `task_location` / `frs_id` 等。
 4. **普通 `export <folder> --type DSS|WORKFLOW`**：folder 仍作 `list_tasks()` 枚举范围，但**不再**
    把 `folder_path=args.folder` 传给 `get_task_detail()`（只传 name/type）。MTT 保留 folder /
-   federated-id 流程。
+   FRS object ID 流程。
 5. **`export-selected` 输入 schema 按类型区分**：MTT `{name,type,folder}`（folder 键必须存在、
    字符串、trim 后非空，否则 `SelectedTaskInputError`）；DSS / WORKFLOW `{name,type}`。
 6. **DSS / WORKFLOW 兼容**：`folder:""` 或纯空白 → 归一化丢弃 key；`folder:"非空"` → **快速失败**
@@ -1300,7 +1300,7 @@ DSS compact/full、MTT/WORKFLOW get-task 回归、selected DSS 11 列、connecti
 ### 未改动（回归保证）
 
 DSS route `dsstask/name/{name}`、WORKFLOW route `workflow/name/{name}`、MTT FRS 路由与
-folder/federated 流程、MTT `MTT_HEADERS`(22)、`DSS_HEADERS`(11)、DSS `1 task=1 row`、WORKFLOW child
+folder/FRS 流程、MTT `MTT_HEADERS`(22)、`DSS_HEADERS`(11)、DSS `1 task=1 row`、WORKFLOW child
 展开 / 零 child / fallback 与 `max(1,len)` count、`compact_record` / `build_dss_summary_rows` /
 `build_task_summary_rows`、enrichment warning 分级、缓存契约、`get-task WORKFLOW` 扁平输出、
 DSS get-task compact/full——全部不变。

@@ -74,7 +74,7 @@ def main() -> int:
     else:
         task_name = TEST_TASK or result_typed["tasks"][0]["name"]
 
-        # Amendment 8：folder 仅 MTT 需要（V3→federated→FRS）；DSS/WORKFLOW 按 name
+        # Amendment 8：folder 仅 MTT 需要（V3→FRS object ID→FRS）；DSS/WORKFLOW 按 name
         # 解析、不得传 folder（否则 UnsupportedArgumentError）。
         if TEST_TYPE == "MTT":
             detail = get_task_detail(
@@ -89,7 +89,7 @@ def main() -> int:
         assert "runtime_environment" in detail
         if TEST_TYPE == "MTT":
             assert detail["detail_route"] == "v2-mttask-frs", detail
-            assert detail["federated_id"], detail
+            assert detail["frs_id"], detail
             assert "id_type" not in detail, detail
             assert detail["task_mapping"]["location"] is None, detail
             assert "transformations" in detail and "raw" in detail

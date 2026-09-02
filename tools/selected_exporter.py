@@ -198,7 +198,7 @@ def _process_by_name(client, ttype, tuples, failures, output_dir, ts):
 
 
 def _process_mtt(client, tuples, failures, output_dir, ts):
-    """MTT：每 folder 一次 discovery → name index → federated id → 现有 FRS detail。"""
+    """MTT：每 folder 一次 discovery → name index → FRS object ID → 现有 FRS detail。"""
     requested = len(tuples)
     if requested == 0:
         return _empty_result()
@@ -241,9 +241,9 @@ def _process_mtt(client, tuples, failures, output_dir, ts):
             failed_local.append(f)
             failures.append(f)
             continue
-        federated_id = cands[0].get("id", "")
-        d = get_task_detail(client, task_type="MTT", task_id=federated_id,
-                            task_id_type="federated")
+        frs_id = cands[0].get("id", "")
+        d = get_task_detail(client, task_type="MTT", task_id=frs_id,
+                            task_id_type="frs")
         if isinstance(d, dict) and "error" in d:
             f = {"type": "MTT", "folder": folder, "name": name,
                  "error_type": d.get("error_type", ""), "error": d.get("error", "")}

@@ -252,7 +252,7 @@ python iics_cli.py get-task <task_name> <task_type> [--folder PATH] [--no-resolv
 |------|------|------|
 | `<task_name>` | 必須 | task 名 |
 | `<task_type>` | 必須 | `DSS` / `MTT` / `WORKFLOW` |
-| `--folder` | **MTT のみ必須** | MTT は federated ID 特定に必須。**DSS / WORKFLOW は非対応**（非空を渡すと `UnsupportedArgumentError`、Amendment 8） |
+| `--folder` | **MTT のみ必須** | MTT は FRS ID 特定に必須。**DSS / WORKFLOW は非対応**（非空を渡すと `UnsupportedArgumentError`、Amendment 8） |
 | `--no-resolve` | 任意 | connection ID → 名前の解決をスキップし、ID のみ表示 |
 
 例：
@@ -276,9 +276,9 @@ python iics_cli.py get-task DI_FACT_SALES_DAILY DSS
 
 > **DSS `get-task` は既定で compact**（DSS Excel 11 列と一致）：`{task_count:1, rows:1, records:[{11 項目}]}` を返します。`--full` で上記の完全 detail を返します（上の JSON は `--full` の形）。`runtime_environment.name` は DSS では常に空（DSS 詳細 API が返さない、プラットフォーム制約でバグではない）。
 >
-> **MTT 詳細は増強済み**：MTT は公式 FRS 経路を使い、DSS/WORKFLOW と異なる構造を返します——トップレベルに `id`（classic V2 ID）、`federated_id`（V3/FRS ID）、`detail_route`、`runtime_environment{id,name}`、`task_mapping{id,name,location,updated_on}`（`location` は現状空）、`transformations[]`（MTT parameters のみ由来）、`enrichment_warnings[]`。
+> **MTT 詳細は増強済み**：MTT は公式 FRS 経路を使い、DSS/WORKFLOW と異なる構造を返します——トップレベルに `id`（classic V2 ID）、`frs_id`（V3/FRS ID）、`detail_route`、`runtime_environment{id,name}`、`task_mapping{id,name,location,updated_on}`（`location` は現状空）、`transformations[]`（MTT parameters のみ由来）、`enrichment_warnings[]`。
 >
-> **MTT 照会は task name と `--folder` の両方が必須**：指定した folder 内でまず該当 task の federated ID を特定し、公式の FRS detail エンドポイントで詳細を取得します。これにより MTT のフォルダをまたいだ同名の曖昧さは解消されます。例：
+> **MTT 照会は task name と `--folder` の両方が必須**：指定した folder 内でまず該当 task の FRS ID を特定し、公式の FRS detail エンドポイントで詳細を取得します。これにより MTT のフォルダをまたいだ同名の曖昧さは解消されます。例：
 >
 > ```powershell
 > python .\iics_cli.py get-task TASK_NAME MTT --folder JAPAN_SCRM_BAU
@@ -293,7 +293,7 @@ python .\iics_cli.py get-task TASK_NAME MTT --folder JAPAN_SCRM_BAU
 # → {"task_count": 1, "rows": 2, "records": [ {業務フィールド…}, … ]}
 ```
 
-完全な内部構造（`raw` / `federated_id` / `transformations` 等、診断・分析用）が必要な場合は `--full`：
+完全な内部構造（`raw` / `frs_id` / `transformations` 等、診断・分析用）が必要な場合は `--full`：
 
 ```powershell
 python .\iics_cli.py get-task TASK_NAME MTT --folder JAPAN_SCRM_BAU --full
@@ -419,7 +419,7 @@ python .\iics_cli.py export-selected --input .\selected_tasks.json --output-dir 
 主な制約:
 
 - **DSS / WORKFLOW は名前照会**: detail 層に folder identity が無く、組織内の別 folder に同名があっても曖昧さを解消できません（summary warning で通知）。dedup キーは `(type, name)`。
-- **MTT は folder で確実に区別可能**（V3 で federated id を特定）、フォルダをまたいだ同名も問題なし。dedup キーは `(type, folder, name)`——MTT の同名は folder が異なれば別 task として保持。
+- **MTT は folder で確実に区別可能**（V3 で FRS object ID を特定）、フォルダをまたいだ同名も問題なし。dedup キーは `(type, folder, name)`——MTT の同名は folder が異なれば別 task として保持。
 - 個別 task の失敗は全体を中断しません。入力 JSON 自体が不正な場合のみ全体失敗（exit 1）。
 
 > Mode A（Claude Code）は Excel / CSV / Markdown 表 / 貼り付けテキストから上記 JSON を作成して呼び出せますが、Python の正式入力は **JSON のみ**。最終集計は summary を正とします。
@@ -502,7 +502,7 @@ python smoke_test.py
 | `{"error":"IICS_SESSION_TOKEN 未設定"}`、終了コード 1 | 環境変数が未設定、または新しいウィンドウ | `$env:IICS_SESSION_TOKEN = "..."` を再設定 |
 | `RuntimeError: IICS session expired...` | Token 失効（401） | ブラウザで `USER_SESSION` を再取得し設定し直す |
 | `list-tasks` が `{"error":...}` を返す | フォルダ名の誤り | 3 つの `JAPAN_*` のいずれかか確認 |
-| `get-task` の結果が期待した task と異なる | 同名 task のフォルダ間曖昧さ | **MTT** は `--folder` を付与（federated ID で確実に区別）。**DSS / WORKFLOW** は name のみで解決され `--folder` 非対応——組織内同名は区別不可（既知の制約） |
+| `get-task` の結果が期待した task と異なる | 同名 task のフォルダ間曖昧さ | **MTT** は `--folder` を付与（FRS ID で確実に区別）。**DSS / WORKFLOW** は name のみで解決され `--folder` 非対応——組織内同名は区別不可（既知の制約） |
 | Excel が開けない / sheet 欠落 | `openpyxl` の導入不良、または書き込み失敗 | `py -m pip install -r requirements.txt` を再実行し、ディレクトリの書き込み権限を確認 |
 | Claude Code 起動コマンドが構文エラー | PowerShell でバックスラッシュ `\` を継続行に使用 | PowerShell はバッククォート `` ` `` を使用。バックスラッシュ継続は Bash/WSL のみ有効 |
 | stdout に非 JSON が混入 | 発生してはならない不具合 | 完全なコマンドと出力を添えて開発者へ報告 |

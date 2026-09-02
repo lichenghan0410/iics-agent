@@ -28,7 +28,7 @@ export IICS_SESSION_TOKEN="<USER_SESSION 值>"
 ```bash
 python iics_cli.py list-tasks <folder> [--type DSS|MTT|WORKFLOW|ALL] [--page-size N]
 python iics_cli.py get-task <task_name> <task_type> [--folder PATH] [--no-resolve]
-#   --folder 仅 MTT（定位 federated id）；DSS/WORKFLOW 不接受 --folder（Amendment 8）
+#   --folder 仅 MTT（定位 FRS object ID）；DSS/WORKFLOW 不接受 --folder（Amendment 8）
 python iics_cli.py resolve-connection <id> [<id>...]
 python iics_cli.py export <folder> [--type ALL] [--format excel|json] [--filename NAME]
 # 只导出给定 list 中指定的 task（不是 folder 全量），按类型生成 3 个独立 Excel
@@ -46,16 +46,16 @@ python iics_cli.py export-selected --input <selected_tasks.json> --output-dir <d
 ## MTT 详情强制规则（Amendment 2）
 
 - MTT 的 name 查询**必须带 `--folder`**。
-- 必须通过 **V3 folder 枚举取得 federated ID**，再调用 **`mttask/frs/{federated_id}`**。
+- 必须通过 **V3 folder 枚举取得 FRS ID**，再调用 **`mttask/frs/{frs_id}`**。
 - **不得**调用裸 `mttask/{id}`。
 - **不得**回退 `mttask/name/{name}`。
 - **不得**接受用户直接传入 MTT `--id`。
-- 内部 task_id 调用**必须显式标记** `task_id_type="federated"`。
+- 内部 task_id 调用**必须显式标记** `task_id_type="frs"`。
 - `task_id` 与 `task_name`/`folder` **不得同时提供**。
 
 ## MTT 信息增强 / 导出（Amendment 3）
 
-- MTT 归一化 detail：顶层 `id`=classic V2 ID、`federated_id`=V3/FRS ID（**无 `id_type`**）。
+- MTT 归一化 detail：顶层 `id`=classic V2 ID、`frs_id`=V3/FRS ID（**无 `id_type`**）。
 - runtime 字段统一为 `runtime_environment {id,name}`（旧名 `runtime_agent` 已弃用）；
   MTT 用 `runtimeEnvironmentId → runtimeEnvironment/{id}`，**不得**用 `agentId`。
 - mapping 用 `mappingId → mapping/{id}`（name/updated_on）；`Mapping Location` **不可靠获取、
@@ -74,7 +74,7 @@ python iics_cli.py export-selected --input <selected_tasks.json> --output-dir <d
 ## DSS / WORKFLOW 规则
 
 - **不得**使用 `task_id` / `task_id_type` 新参数。
-- **不得**用 V3 federated ID 调 V2 by-id（实测返回 500，是 MTT 类型特例）。
+- **不得**用 V3 FRS ID 调 V2 by-id（实测返回 500，是 MTT 类型特例）。
 - 保持现状 V2 by-name。
 - **（Amendment 8）DSS / WORKFLOW detail 层无可靠 folder identity**：`get-task` 不接受
   `--folder`（传入非空 → `UnsupportedArgumentError`，不发 HTTP）；normalized detail **不含**
@@ -82,7 +82,7 @@ python iics_cli.py export-selected --input <selected_tasks.json> --output-dir <d
 
 ## WORKFLOW export 规则（Amendment 5）
 
-- WORKFLOW 详情继续用 `workflow/name/{name}`（不改路由；不得把 child `taskId` 当 V3 federated ID）。
+- WORKFLOW 详情继续用 `workflow/name/{name}`（不改路由；不得把 child `taskId` 当 V3 FRS ID）。
 - WORKFLOW export **只展开 `raw.tasks[]`**：一个 child = 一行；**不得**为 child 再查
   `mttask/{id}` / `mttask/name/{name}` / `workflow/{child_id}` 等 child 详情。
 - WORKFLOW Excel 用**独立 8 列 schema（Amendment 8：去 folder）**：`Task Type, orgId, id,
@@ -99,7 +99,7 @@ python iics_cli.py export-selected --input <selected_tasks.json> --output-dir <d
 - DSS 用独立 **11 列** `DSS_HEADERS`（`@type, id, orgId, Task Name, Task Type, Task Updated On,
   Source Connection, Source Object, Operation, Target Connection, Target Object`）；**1 task = 1 行**。
 - `Source Object` **只取 `sourceObjects[0].name`**（单值，不多值展开、不告警）。
-- DSS detail route **仍 `dsstask/name/{name}`**，不新增 API、不用 federated id。
+- DSS detail route **仍 `dsstask/name/{name}`**，不新增 API、不用 FRS object ID。
 - `get-task <name> DSS` 默认 compact（records=DSS_HEADERS）；`--full` 完整 detail。
 
 ## Selected Task Export（Amendment 6 / 8）

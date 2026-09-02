@@ -4,7 +4,7 @@ tools/query.py — 只读查询工具：list_tasks / get_task_detail / resolve_c
 v0.1 Read-only MVP。
 Step 5 implements normalize_task_type / list_tasks（V3 枚举 + 自动分页）。
 Step 6 implements get_task_detail + extract_runtime_env_name / extract_connection_ids。
-MTT 详情走官方 FRS 路径 mttask/frs/{federated_id}（V3 folder 枚举取 federated id →
+MTT 详情走官方 FRS 路径 mttask/frs/{frs_id}（V3 folder 枚举取 FRS object ID →
 跨 folder 同名消歧）；DSS / WORKFLOW 保持 V2 by-name 现状，不支持 task_id/task_id_type。
 Step 7 implements resolve_connection（V2 connection/<id> + ConnectionCache），并把
 get_task_detail(resolve_connections=True) 接入真实 connection name 解析。
@@ -141,7 +141,7 @@ _V2_DETAIL_PATH = {
     "WORKFLOW": "workflow/name/",
 }
 
-# MTT 详情官方文档明确支持的路径：只接受 federated / FRS ID
+# MTT 详情官方文档明确支持的路径：只接受 FRS object ID
 _V2_MTT_FRS = "mttask/frs/"
 
 _DETAIL_TASK_TYPES = {"DSS", "MTT", "WORKFLOW"}
@@ -404,7 +404,7 @@ def _resolve_mapping(client, mapping_id, warnings):
             "updated_on": m.get("updated_on")}
 
 
-def _build_mtt_detail(client, raw, federated_id, task_name, folder_path,
+def _build_mtt_detail(client, raw, frs_id, task_name, folder_path,
                       resolve_connections):
     """把 MTT FRS raw 规范化为增强 detail（不直接 merge raw，显式映射字段）。"""
     warnings = []
@@ -438,7 +438,7 @@ def _build_mtt_detail(client, raw, federated_id, task_name, folder_path,
         "@type": raw.get("@type", ""),
         "id": raw.get("id", ""),               # classic V2 id（来自 FRS payload）
         "orgId": raw.get("orgId", ""),
-        "federated_id": federated_id,          # V3/FRS id（用于 FRS 请求）
+        "frs_id": frs_id,          # V3/FRS id（用于 FRS 请求）
         "detail_route": "v2-mttask-frs",
         "task_name": task_name or raw.get("name", ""),
         "task_type": "MTT",
@@ -462,32 +462,32 @@ def _build_mtt_detail(client, raw, federated_id, task_name, folder_path,
 
 def _get_mtt_detail(client, task_name, folder_path, task_id, task_id_type,
                     resolve_connections):
-    """MTT 详情：官方 FRS 端点 mttask/frs/{federated_id}（只接受 federated ID）。
+    """MTT 详情：官方 FRS 端点 mttask/frs/{frs_id}（只接受 FRS object ID）。
 
-    方式 A：name + folder → V3 folder 枚举取 federated id → FRS。
-    方式 B：内部直接传 federated id（task_id + task_id_type="federated"）。
+    方式 A：name + folder → V3 folder 枚举取 FRS object ID → FRS。
+    方式 B：内部直接传 FRS object ID（task_id + task_id_type="frs"）。
     """
-    # ── 方式 B：直接 federated id ─────────────────────────────────────────
+    # ── 方式 B：直接 FRS object ID ────────────────────────────────────────
     if task_id:
-        if task_id_type == "federated":
-            federated_id = task_id
+        if task_id_type == "frs":
+            frs_id = task_id
             try:
                 resp = client._request(
-                    "GET", _V2_MTT_FRS + federated_id, use_v3=False
+                    "GET", _V2_MTT_FRS + frs_id, use_v3=False
                 )
                 raw = resp.json()
             except Exception as e:  # noqa: BLE001
                 return {"error": str(e), "error_type": type(e).__name__}
             return _build_mtt_detail(
-                client, raw, federated_id, "", "", resolve_connections
+                client, raw, frs_id, "", "", resolve_connections
             )
-        # 非 federated：classic / 空 / 其它 → 一律 InvalidIdTypeError，不发 HTTP
+        # 非 FRS：classic / 空 / 其它 → 一律 InvalidIdTypeError，不发 HTTP
         if task_id_type == "classic":
-            msg = "MTT FRS detail lookup requires a federated ID"
+            msg = "MTT FRS detail lookup requires an FRS ID"
         elif not task_id_type:
-            msg = "task_id_type='federated' is required for MTT task_id lookup"
+            msg = "task_id_type='frs' is required for MTT task_id lookup"
         else:
-            msg = "MTT FRS detail lookup requires a federated ID"
+            msg = "MTT FRS detail lookup requires an FRS ID"
         return {"error": msg, "error_type": "InvalidIdTypeError"}
 
     # ── 方式 A：name + folder ────────────────────────────────────────────
@@ -524,14 +524,14 @@ def _get_mtt_detail(client, task_name, folder_path, task_id, task_id_type,
             "candidates": candidates,
         }
 
-    federated_id = matches[0].get("id", "")
+    frs_id = matches[0].get("id", "")
     try:
-        resp = client._request("GET", _V2_MTT_FRS + federated_id, use_v3=False)
+        resp = client._request("GET", _V2_MTT_FRS + frs_id, use_v3=False)
         raw = resp.json()
     except Exception as e:  # noqa: BLE001
         return {"error": str(e), "error_type": type(e).__name__}
     return _build_mtt_detail(
-        client, raw, federated_id, task_name, folder_path, resolve_connections
+        client, raw, frs_id, task_name, folder_path, resolve_connections
     )
 
 
@@ -546,7 +546,7 @@ def get_task_detail(
 ) -> dict:
     """获取单个 task 详情。
 
-    - MTT：官方 FRS 路径 mttask/frs/{federated_id}（跨 folder 同名消歧，见 _get_mtt_detail）。
+    - MTT：官方 FRS 路径 mttask/frs/{frs_id}（跨 folder 同名消歧，见 _get_mtt_detail）。
       task_id/task_id_type 仅 MTT 支持；用户 CLI 不直接传 MTT id。
     - DSS / WORKFLOW：保持现有 V2 by-name 行为，不支持 task_id/task_id_type。
     """
@@ -567,7 +567,7 @@ def get_task_detail(
     if task_type in ("DSS", "WORKFLOW") and (task_id or task_id_type):
         return {
             "error": "task_id and task_id_type are only supported for MTT "
-                     "federated lookup",
+                     "FRS lookup",
             "error_type": "UnsupportedArgumentError",
         }
 

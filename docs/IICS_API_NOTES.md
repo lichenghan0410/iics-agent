@@ -142,30 +142,30 @@ id, path, type, description, updatedBy, updateTime, tags, sourceControl, customA
 
 ### 7.0 MTT ID 体系与 FRS 详情端点（Amendment 2 依据）
 
-V3 objects 枚举返回的 id 是 **federated / FRS ID**；V2 另有 **classic ID**，二者是不同体系：
+V3 objects 枚举返回的 id 是 **FRS ID**；V2 另有 **classic ID**，二者是不同体系：
 
 | ID 类型 | 示例 |
 |--------|------|
-| federated / FRS | `fABfm4RCYqVfuVEi9e8BGb` |
+| FRS | `fABfm4RCYqVfuVEi9e8BGb` |
 | classic V2 | `000LVU0I0000000004TZ` |
 
-| 端点 | federated ID | classic ID | 说明 |
+| 端点 | FRS ID | classic ID | 说明 |
 |------|:---:|:---:|------|
-| `GET /saas/api/v2/mttask/frs/{ID}` | ✅ 成功 | ❌ 失败 | **官方文档明确支持 federated ID**；项目 MTT 默认路径 |
+| `GET /saas/api/v2/mttask/frs/{ID}` | ✅ 成功 | ❌ 失败 | **官方文档明确支持 FRS ID**；项目 MTT 默认路径 |
 | `GET /saas/api/v2/mttask/{ID}`（裸） | ✅ 实测成功 | ✅ 实测成功 | 属**实测兼容行为**，官方未明确保证；**不作为项目默认契约** |
 
-**ID 类型约束**：`/mttask/frs/{id}` **严格要求 federated ID**，classic ID **不得**传入该端点。
-代码依赖显式 `task_id_type="federated"` 契约，不做 `startswith("000")` 之类字符串启发式判断。
+**ID 类型约束**：`/mttask/frs/{id}` **严格要求 FRS ID**，classic ID **不得**传入该端点。
+代码依赖显式 `task_id_type="frs"` 契约，不做 `startswith("000")` 之类字符串启发式判断。
 
 **MTT 是类型特例，不得推广到 DSS / WORKFLOW**——实测：
 
 ```
-DSS:      V3 federated ID → GET /saas/api/v2/dsstask/{id}   → 500
-WORKFLOW: V3 federated ID → GET /saas/api/v2/workflow/{id}  → 500
+DSS:      V3 FRS ID → GET /saas/api/v2/dsstask/{id}   → 500
+WORKFLOW: V3 FRS ID → GET /saas/api/v2/workflow/{id}  → 500
 ```
 
 因此 DSS / WORKFLOW 继续走 V2 by-name（`dsstask/name/<name>` / `workflow/name/<name>`），
-federated → V2 by-id 仅对 MTT（且必须经 `mttask/frs/`）成立。
+FRS → V2 by-id 仅对 MTT（且必须经 `mttask/frs/`）成立。
 
 ### 7.1 DSS（dsstask）详情字段（实测）
 
@@ -213,7 +213,7 @@ Mapping parameters 示例顺序：Target → Source
 ```
 
 因此 **Transformation（顺序 / 运行时覆盖值 / Source-Target 信息）只能来自
-`mttask/frs/{federated_id}.parameters[]`**，不得用 `mapping.parameters[]` 生成。
+`mttask/frs/{frs_id}.parameters[]`**，不得用 `mapping.parameters[]` 生成。
 
 #### 7.3.1 Transformation Name（真实样本 `s_IFA_V_PV_CAE_S_01`，Amendment 4）
 
@@ -258,7 +258,7 @@ tasks = [
 - `tasks[]` 是 WORKFLOW child row 展开的**权威来源**；每个 child = 1 Excel 行。
 - export 只使用 child 的 `taskId` / `type` / `name`（`stopOnError` / `stopOnWarning` 存在但本次
   **不导出**）。
-- child `taskId` 按 V2 response 原样保留，**不做 ID 类型推断**（不得当作 V3 federated ID）。
+- child `taskId` 按 V2 response 原样保留，**不做 ID 类型推断**（不得当作 V3 FRS ID）。
 - WORKFLOW export **不查询** child 的 MTT/DSS 详情（不新增请求）。
 
 ### 7.6 Selected Task Export 复用的现有边界（Amendment 6，无新增 API research）
@@ -266,18 +266,18 @@ tasks = [
 `export-selected` 只是编排层，复用已实测的路径，**未引入新 API 结论**：
 
 - DSS 详情：`dsstask/name/{name}`（by-name）。
-- MTT 详情：V3 folder 枚举取 federated id → `mttask/frs/{federated_id}`。
+- MTT 详情：V3 folder 枚举取 FRS object ID → `mttask/frs/{frs_id}`。
 - WORKFLOW 详情：`workflow/name/{name}`（by-name）。
 
 **本 feature 未解决 DSS / WORKFLOW 的 organization 级同名 ambiguity**：by-name 端点无 folder 约束，
 组织内其它 folder 若存在同名 DSS/WORKFLOW，仍无法保证取到 selected folder 的那个（summary
-warning 提示，属固有风险，未扫描全组织）。MTT 经 folder discovery + federated id 无此问题。
+warning 提示，属固有风险，未扫描全组织）。MTT 经 folder discovery + FRS object ID 无此问题。
 
 > **Amendment 8 明确 folder 语义**：DSS / WORKFLOW 的 detail 层**无可靠 folder identity**，
 > folder 仅是 `list-tasks` / `export` 的**枚举范围**，不是详情身份。因此 `get-task DSS|WORKFLOW`
 > 与 selected 输入**不接受 folder**（非空即 `UnsupportedArgumentError` / `SelectedTaskInputError`，
 > 发 HTTP 之前失败），normalized detail 不含合成 `folder` 键。dedup 键 DSS/WORKFLOW=`(type,name)`、
-> MTT=`(type,folder,name)`。只有 **MTT** 的 folder 是真实身份数据（V3 discovery → federated id）。
+> MTT=`(type,folder,name)`。只有 **MTT** 的 folder 是真实身份数据（V3 discovery → FRS object ID）。
 
 ---
 
@@ -298,7 +298,7 @@ warning 提示，属固有风险，未扫描全组织）。MTT 经 folder discov
 
 - MTT / WORKFLOW 详情的 runtime 与 connection 字段结构（v0.1 仅深度验证 DSS）。
 - V3 `q` 是否支持 `tag` / `updateTime` 过滤（KB 提及，未验证）。
-- 跨文件夹同名 task：**MTT 已解决**（V3 federated id → `mttask/frs/{id}`，见 §7.0）；
-  **DSS / WORKFLOW 仍未解决**（federated → V2 by-id 返回 500，继续 by-name）。Amendment 8 起
+- 跨文件夹同名 task：**MTT 已解决**（V3 FRS object ID → `mttask/frs/{id}`，见 §7.0）；
+  **DSS / WORKFLOW 仍未解决**（FRS → V2 by-id 返回 500，继续 by-name）。Amendment 8 起
   明确 DSS/WORKFLOW folder 非详情身份、不接受 folder 输入（见 §7.6 注）。
 - 写操作（update/batch）的 PARTIAL UPDATE 行为——v0.1 严格只读，未触碰。

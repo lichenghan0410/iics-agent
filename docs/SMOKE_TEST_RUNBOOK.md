@@ -33,7 +33,7 @@ v0.1 的自动化测试分两层，本手册覆盖**集成层（真实 API 冒�
 | Test 1 | `SessionManager` + URL factory | 纯函数 | server_url 正确、`/saas` 不重复 |
 | Test 2 | `list_tasks`（全部类型，含分页） | 集成-只读 | 返回 `tasks`，`count >= 0` |
 | Test 3 | `list_tasks`（按 type 过滤） | 集成-只读 | 返回 `tasks`，type 归一化生效 |
-| Test 4 | `get_task_detail`（DSS/WORKFLOW: V2 by-name；MTT: V3→federated→`mttask/frs`） | 集成-只读 | 无 error、含 `runtime_agent`；MTT 另断言 `detail_route`/`id_type` |
+| Test 4 | `get_task_detail`（DSS/WORKFLOW: V2 by-name；MTT: V3→FRS object ID→`mttask/frs`） | 集成-只读 | 无 error、含 `runtime_agent`；MTT 另断言 `detail_route`/`id_type` |
 | Test 5 | `resolve_connection` + 缓存命中 | 集成-只读 | 两次解析结果一致（第二次走缓存） |
 | Test 6 | `export_results`（openpyxl 单 sheet Task Summary） | 集成-本地 IO | 生成 `.xlsx` 且文件存在 |
 
@@ -270,10 +270,10 @@ python .\smoke_test.py
 
 正例验收：
 
-- [ ] `detail_route == "v2-mttask-frs"`；`federated_id` 非空；**`id_type` 已移除**（不存在）。
-- [ ] 顶层 `id` 为 classic V2 ID（与 `federated_id` 不同体系）。
+- [ ] `detail_route == "v2-mttask-frs"`；`frs_id` 非空；**`id_type` 已移除**（不存在）。
+- [ ] 顶层 `id` 为 classic V2 ID（与 `frs_id` 不同体系）。
 - [ ] 无 404 / 500；connection 解析正常；Test 4 实跑非 SKIP。
-- [ ] 详情经 `mttask/frs/{federated_id}` 获取（非 `mttask/name/`、非裸 `mttask/{id}`）。
+- [ ] 详情经 `mttask/frs/{frs_id}` 获取（非 `mttask/name/`、非裸 `mttask/{id}`）。
 
 负例（预期结构化错误，均**不发** HTTP）：
 
@@ -322,8 +322,8 @@ get-task：
 
 - [ ] 默认 `get-task NAME MTT --folder F` 返回 `{task_count, rows, records[]}`；`records` 每条
       恰为 22 个 Task Summary 业务字段（一个 transformation = 一条 record）。
-- [ ] 默认 compact **不含** `raw` / `federated_id` / `detail_route` / `enrichment_warnings`。
-- [ ] `--full` 返回完整 normalized detail（含 `raw` / `federated_id` / `detail_route` / `transformations`）。
+- [ ] 默认 compact **不含** `raw` / `frs_id` / `detail_route` / `enrichment_warnings`。
+- [ ] `--full` 返回完整 normalized detail（含 `raw` / `frs_id` / `detail_route` / `transformations`）。
 - [ ] DSS / WORKFLOW `get-task` 仍为扁平 dict（无 `records`），结构与 MTT 不对称。
 
 Excel / schema：

@@ -76,7 +76,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_get.add_argument("type", choices=["DSS", "MTT", "WORKFLOW"])
     p_get.add_argument(
         "--folder", default="",
-        help="MTT 必需（用于 V3 定位 federated id）；DSS / WORKFLOW 不支持——"
+        help="MTT 必需（用于 V3 定位 FRS object ID）；DSS / WORKFLOW 不支持——"
              "其详情按 name 解析，传入非空 --folder 将报 UnsupportedArgumentError",
     )
     p_get.add_argument(
@@ -169,13 +169,13 @@ def _cmd_export(client, args) -> dict:
             tid = task.get("id", "")
             _log(f"  fetching detail: {name} ({ttype})")
             if ttype == "MTT":
-                # MTT：复用 list_tasks 已返回的 federated id 走 FRS，
+                # MTT：复用 list_tasks 已返回的 FRS object ID 走 FRS，
                 # 不传 name/folder（避免 ConflictingArgumentsError），后续回填
                 detail = get_task_detail(
                     client,
                     task_type="MTT",
                     task_id=tid,
-                    task_id_type="federated",
+                    task_id_type="frs",
                 )
                 if isinstance(detail, dict) and "error" not in detail:
                     # MTT 归一化 detail 用 task_name/task_location；method B 返回时为空，回填

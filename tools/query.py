@@ -5,7 +5,8 @@ v0.1 Read-only MVP。
 Step 5 implements normalize_task_type / list_tasks（V3 枚举 + 自动分页）。
 Step 6 implements get_task_detail + extract_runtime_env_name / extract_connection_ids。
 MTT 详情走官方 FRS 路径 mttask/frs/{frs_id}（V3 folder 枚举取 FRS object ID →
-跨 folder 同名消歧）；DSS / WORKFLOW 保持 V2 by-name 现状，不支持 task_id/task_id_type。
+跨 folder 同名消歧）；DSS / WORKFLOW 仍走 V2 by-name（Amendment 9：folder 用于 FRS
+discovery 取 frs_id，但 by-name detail 无法按 folder 消歧）。三类型统一暴露 id + frs_id。
 Step 7 implements resolve_connection（V2 connection/<id> + ConnectionCache），并把
 get_task_detail(resolve_connections=True) 接入真实 connection name 解析。
 
@@ -109,7 +110,9 @@ def list_tasks(
                         {
                             "name": _object_name(item),
                             "type": normalize_task_type(item.get("type", "")),
-                            "id": item.get("id", ""),
+                            # Amendment 9：V3 /objects 返回的 id 即 FRS object ID，
+                            # 统一命名 frs_id（不再用有歧义的 id 表示 FRS ID）。
+                            "frs_id": item.get("id", ""),
                             "status": item.get("status", ""),
                             "path": item.get("path", ""),
                         }
@@ -460,71 +463,49 @@ def _build_mtt_detail(client, raw, frs_id, task_name, folder_path,
     }
 
 
-def _get_mtt_detail(client, task_name, folder_path, task_id, task_id_type,
-                    resolve_connections):
-    """MTT 详情：官方 FRS 端点 mttask/frs/{frs_id}（只接受 FRS object ID）。
+def _discover_frs_id(client, folder_path, task_type, task_name):
+    """共享 FRS discovery（Amendment 9）：folder + type 枚举 → 精确 name 匹配 → frs_id。
 
-    方式 A：name + folder → V3 folder 枚举取 FRS object ID → FRS。
-    方式 B：内部直接传 FRS object ID（task_id + task_id_type="frs"）。
+    三种 task type 复用同一 0/1/>1 判定与 candidates 结构，避免各自重复实现。
+    返回 (frs_id, error_dict|None)：
+      - 枚举失败 → (None, listed_error)
+      - 0 match → (None, TaskNotFoundError)
+      - >1 match → (None, AmbiguousTaskError, candidates 用 frs_id key)
+      - 1 match → (frs_id, None)
+
+    AmbiguousTaskError 仅表示「V3 discovery 结果内无法唯一确定 FRS object」，
+    不代表 DSS/WORKFLOW 的 V2 by-name detail 已能按 folder 消歧。
     """
-    # ── 方式 B：直接 FRS object ID ────────────────────────────────────────
-    if task_id:
-        if task_id_type == "frs":
-            frs_id = task_id
-            try:
-                resp = client._request(
-                    "GET", _V2_MTT_FRS + frs_id, use_v3=False
-                )
-                raw = resp.json()
-            except Exception as e:  # noqa: BLE001
-                return {"error": str(e), "error_type": type(e).__name__}
-            return _build_mtt_detail(
-                client, raw, frs_id, "", "", resolve_connections
-            )
-        # 非 FRS：classic / 空 / 其它 → 一律 InvalidIdTypeError，不发 HTTP
-        if task_id_type == "classic":
-            msg = "MTT FRS detail lookup requires an FRS ID"
-        elif not task_id_type:
-            msg = "task_id_type='frs' is required for MTT task_id lookup"
-        else:
-            msg = "MTT FRS detail lookup requires an FRS ID"
-        return {"error": msg, "error_type": "InvalidIdTypeError"}
-
-    # ── 方式 A：name + folder ────────────────────────────────────────────
-    if not task_name:
-        return {"error": "task_name or task_id is required",
-                "error_type": "ValueError"}
-    if not folder_path:
-        return {"error": "folder_path is required for MTT detail lookup",
-                "error_type": "MissingFolderError"}
-
-    listed = list_tasks(client, folder_path=folder_path, task_type="MTT")
+    listed = list_tasks(client, folder_path=folder_path, task_type=task_type)
     if isinstance(listed, dict) and "error" in listed:
-        return listed
+        return None, listed
     matches = [
         t for t in listed.get("tasks", [])
-        if t.get("name") == task_name and t.get("type") == "MTT"
+        if t.get("name") == task_name and t.get("type") == task_type
     ]
     if not matches:
-        return {"error": "MTT task not found in folder",
-                "error_type": "TaskNotFoundError"}
+        return None, {"error": f"{task_type} task not found in folder",
+                      "error_type": "TaskNotFoundError"}
     if len(matches) > 1:
         candidates = [
             {
-                "id": m.get("id", ""),
+                "frs_id": m.get("frs_id", ""),
                 "path": m.get("path", ""),
                 "type": m.get("type", ""),
                 "name": m.get("name", ""),
             }
             for m in matches
         ]
-        return {
-            "error": "Multiple MTT tasks matched in the same folder",
+        return None, {
+            "error": f"Multiple {task_type} tasks matched in the same folder",
             "error_type": "AmbiguousTaskError",
             "candidates": candidates,
         }
+    return matches[0].get("frs_id", ""), None
 
-    frs_id = matches[0].get("id", "")
+
+def _mtt_detail_by_frs(client, frs_id, task_name, folder_path, resolve_connections):
+    """MTT：已知 frs_id → mttask/frs/{frs_id} → 归一化 detail。"""
     try:
         resp = client._request("GET", _V2_MTT_FRS + frs_id, use_v3=False)
         raw = resp.json()
@@ -533,6 +514,27 @@ def _get_mtt_detail(client, task_name, folder_path, task_id, task_id_type,
     return _build_mtt_detail(
         client, raw, frs_id, task_name, folder_path, resolve_connections
     )
+
+
+def _dss_wf_detail_by_name(client, task_name, task_type, frs_id, resolve_connections):
+    """DSS / WORKFLOW：V2 by-name detail（Amendment 9：注入 id=classic + frs_id）。
+
+    frs_id 来自 folder-scoped V3 discovery，仅用于回填结果，不参与 by-name detail 消歧。
+    id 为 by-name detail response 的 classic V2 ID。
+    """
+    try:
+        path = _V2_DETAIL_PATH[task_type] + task_name
+        resp = client._request("GET", path, use_v3=False)
+        raw = resp.json()
+        detail = {
+            "name": task_name,
+            "type": task_type,
+            "id": raw.get("id", ""),   # classic V2 ID（by-name response）
+            "frs_id": frs_id,          # FRS object ID（folder-scoped discovery）
+        }
+        return _apply_extraction(client, detail, raw, task_type, resolve_connections)
+    except Exception as e:  # noqa: BLE001 — 工具层统一结构化错误
+        return {"error": str(e), "error_type": type(e).__name__}
 
 
 def get_task_detail(
@@ -544,11 +546,13 @@ def get_task_detail(
     task_id_type: str = "",
     resolve_connections: bool = True,
 ) -> dict:
-    """获取单个 task 详情。
+    """获取单个 task 详情（Amendment 9：三类型统一 FRS discovery + 双 ID 契约）。
 
-    - MTT：官方 FRS 路径 mttask/frs/{frs_id}（跨 folder 同名消歧，见 _get_mtt_detail）。
-      task_id/task_id_type 仅 MTT 支持；用户 CLI 不直接传 MTT id。
-    - DSS / WORKFLOW：保持现有 V2 by-name 行为，不支持 task_id/task_id_type。
+    - 三种类型均以 name + folder 经共享 _discover_frs_id 取 frs_id：
+      MTT → mttask/frs/{frs_id}；DSS/WORKFLOW → dsstask|workflow/name/{name}。
+    - 内部编排层可传 task_id(=frs_id) + task_id_type="frs" 跳过 discovery（三类型一致）；
+      CLI / selected 输入不暴露该参数。
+    - 返回统一含 id=classic V2 ID、frs_id=FRS object ID。
     """
     if task_type not in _DETAIL_TASK_TYPES:
         return {
@@ -556,47 +560,52 @@ def get_task_detail(
             "error_type": "ValueError",
         }
 
-    # 参数冲突：task_id 不得与 task_name / folder_path 并存（不发 HTTP、不枚举）
-    if task_id and (task_name or folder_path):
+    # 参数冲突：task_id(=frs_id 直传) 不得与 folder_path（discovery 驱动）并存。
+    # 三类型一致；DSS/WORKFLOW 直传仍需 task_name 构造 by-name URL，故 name 不算冲突。
+    if task_id and folder_path:
         return {
-            "error": "task_id cannot be combined with task_name or folder_path",
+            "error": "task_id cannot be combined with folder_path",
             "error_type": "ConflictingArgumentsError",
         }
 
-    # DSS / WORKFLOW 不支持 task_id/task_id_type
-    if task_type in ("DSS", "WORKFLOW") and (task_id or task_id_type):
-        return {
-            "error": "task_id and task_id_type are only supported for MTT "
-                     "FRS lookup",
-            "error_type": "UnsupportedArgumentError",
-        }
-
-    # Amendment 8：DSS / WORKFLOW by-name 不支持 folder identity（不发 HTTP）
-    if task_type in ("DSS", "WORKFLOW") and folder_path and folder_path.strip():
-        return {
-            "error": f"--folder is not supported for {task_type} get-task because "
-                     f"{task_type} details are resolved by name only.",
-            "error_type": "UnsupportedArgumentError",
-        }
-
-    if task_type == "MTT":
-        return _get_mtt_detail(
-            client, task_name, folder_path, task_id, task_id_type,
-            resolve_connections,
+    # ── 内部 FRS 直传旁路：task_id + task_id_type="frs"（三类型一致校验）──────
+    if task_id or task_id_type:
+        if task_id_type != "frs":
+            # classic / 缺失 / 其它 → InvalidIdTypeError，不发 HTTP
+            return {
+                "error": "FRS detail lookup requires task_id_type='frs'",
+                "error_type": "InvalidIdTypeError",
+            }
+        if not task_id:
+            return {"error": "task_id is required when task_id_type='frs'",
+                    "error_type": "ValueError"}
+        if task_type == "MTT":
+            return _mtt_detail_by_frs(client, task_id, "", "", resolve_connections)
+        # DSS / WORKFLOW：by-name 仍需 name；frs_id 回填
+        if not task_name:
+            return {"error": "task_name is required for DSS/WORKFLOW by-name detail",
+                    "error_type": "ValueError"}
+        return _dss_wf_detail_by_name(
+            client, task_name, task_type, task_id, resolve_connections
         )
 
-    # ── DSS / WORKFLOW：V2 by-name（Amendment 8：detail 不含 synthetic folder）────
+    # ── name + folder 模式（三类型统一 FRS discovery）────────────────────────
     if not task_name:
         return {"error": "task_name is required", "error_type": "ValueError"}
-    try:
-        path = _V2_DETAIL_PATH[task_type] + task_name
-        resp = client._request("GET", path, use_v3=False)
-        raw = resp.json()
-        # 不写入 folder：by-name detail 无可靠 folder identity，不得从用户输入伪造
-        detail = {"name": task_name, "type": task_type}
-        return _apply_extraction(client, detail, raw, task_type, resolve_connections)
-    except Exception as e:  # noqa: BLE001 — 工具层统一结构化错误
-        return {"error": str(e), "error_type": type(e).__name__}
+    if not folder_path:
+        return {"error": f"folder_path is required for {task_type} detail lookup",
+                "error_type": "MissingFolderError"}
+
+    frs_id, err = _discover_frs_id(client, folder_path, task_type, task_name)
+    if err:
+        return err
+    if task_type == "MTT":
+        return _mtt_detail_by_frs(
+            client, frs_id, task_name, folder_path, resolve_connections
+        )
+    return _dss_wf_detail_by_name(
+        client, task_name, task_type, frs_id, resolve_connections
+    )
 
 
 def resolve_connection(client, connection_ids: list) -> dict:

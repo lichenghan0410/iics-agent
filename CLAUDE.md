@@ -27,8 +27,8 @@ export IICS_SESSION_TOKEN="<USER_SESSION 值>"
 
 ```bash
 python iics_cli.py list-tasks <folder> [--type DSS|MTT|WORKFLOW|ALL] [--page-size N]
-python iics_cli.py get-task <task_name> <task_type> [--folder PATH] [--no-resolve]
-#   --folder 仅 MTT（定位 FRS object ID）；DSS/WORKFLOW 不接受 --folder（Amendment 8）
+python iics_cli.py get-task <task_name> <task_type> --folder PATH [--no-resolve]
+#   Amendment 9：三类型均需 --folder（FRS discovery 取 frs_id）；缺失 → MissingFolderError
 python iics_cli.py resolve-connection <id> [<id>...]
 python iics_cli.py export <folder> [--type ALL] [--format excel|json] [--filename NAME]
 # 只导出给定 list 中指定的 task（不是 folder 全量），按类型生成 3 个独立 Excel
@@ -51,7 +51,8 @@ python iics_cli.py export-selected --input <selected_tasks.json> --output-dir <d
 - **不得**回退 `mttask/name/{name}`。
 - **不得**接受用户直接传入 MTT `--id`。
 - 内部 task_id 调用**必须显式标记** `task_id_type="frs"`。
-- `task_id` 与 `task_name`/`folder` **不得同时提供**。
+- （Amendment 9）`task_id` 与 `folder_path` **不得同时提供**（→ ConflictingArgumentsError）；
+  DSS/WORKFLOW 的 frs 直传仍需 `task_name` 构造 by-name URL，故 name 不算冲突。
 
 ## MTT 信息增强 / 导出（Amendment 3）
 
@@ -65,92 +66,96 @@ python iics_cli.py export-selected --input <selected_tasks.json> --output-dir <d
   fallback `parameter.label`（label 可能只是 connection display label，不能作第一优先级）。
 - **`get-task MTT` 默认 compact output**（Task Summary 同款业务字段 records）；`--full` 才展示完整
   normalized detail（诊断用）。DSS/WORKFLOW 保持扁平 dict、不受影响。`get_task_detail()` 返回值不变。
-- Excel：MTT 专属 `MTT_HEADERS`（22 列，Amendment 7 起不再与 DSS 共用）+ `Export Errors`；
-  MTT 每个 transformation 一行。
+- Excel：MTT 专属 `MTT_HEADERS`（**23 列，Amendment 9 起 id 后含 `FRS ID`**）+ `Export Errors`；
+  MTT 每个 transformation 一行。`id`=classic V2 ID、`FRS ID`=FRS object ID。
 - 计数：`task_count`（==list_tasks.count）与 `rows`（物理行数）**分离**；完整成功=task_count 一致
   且 failed_details_count==0；**不得**用 `rows==task_count` 判断。
 - enrichment（mapping/runtime/connection）失败 → `enrichment_warnings`，**不**计入 `failed_details`、不终止导出。
 
-## DSS / WORKFLOW 规则
+## DSS / WORKFLOW 规则（Amendment 9 更新）
 
-- **不得**使用 `task_id` / `task_id_type` 新参数。
-- **不得**用 V3 FRS ID 调 V2 by-id（实测返回 500，是 MTT 类型特例）。
-- 保持现状 V2 by-name。
-- **（Amendment 8）DSS / WORKFLOW detail 层无可靠 folder identity**：`get-task` 不接受
-  `--folder`（传入非空 → `UnsupportedArgumentError`，不发 HTTP）；normalized detail **不含**
-  合成 `folder` 键。folder 仅在 `export`/`list-tasks` 作**枚举范围**，不下沉到 detail 查询。
+- detail route 不变：DSS `dsstask/name/{name}`、WORKFLOW `workflow/name/{name}`。
+- **不得**用 V3 FRS ID 调 V2 by-id（`dsstask/{frs_id}` / `workflow/{frs_id}` 实测 500，MTT 特例）。
+- **（Amendment 9）三类型统一双 ID 契约**：normalized detail 同时含 `id`=classic V2 ID
+  （by-name response）与 `frs_id`=FRS object ID（folder-scoped V3 discovery）。
+- **get-task 三类型均需 `--folder`**：folder 用于 FRS discovery 取 `frs_id`。**但 DSS/WORKFLOW
+  的 folder 只保证 FRS discovery，不能用于 V2 by-name detail 消歧**（组织内其它 folder 存在
+  同名 task 时 by-name 无法按 folder 区分）。这是 by-name endpoint 限制，不是 ID 体系映射问题。
+- 内部编排层可传 `task_id=<frs_id>` + `task_id_type="frs"` 跳过 discovery（三类型一致；
+  CLI / selected 输入**不暴露**这两个参数）。`task_id` 与 `folder_path` 冲突 →
+  `ConflictingArgumentsError`；`task_id_type` 非 `"frs"` → `InvalidIdTypeError`（不发 HTTP）。
 
 ## WORKFLOW export 规则（Amendment 5）
 
 - WORKFLOW 详情继续用 `workflow/name/{name}`（不改路由；不得把 child `taskId` 当 V3 FRS ID）。
 - WORKFLOW export **只展开 `raw.tasks[]`**：一个 child = 一行；**不得**为 child 再查
   `mttask/{id}` / `mttask/name/{name}` / `workflow/{child_id}` 等 child 详情。
-- WORKFLOW Excel 用**独立 8 列 schema（Amendment 8：去 folder）**：`Task Type, orgId, id,
-  Task Name, updateTime, tasks.taskId, tasks.type, tasks.name`。父字段逐行重复。
-  （Amendment 5 曾为 9 列含 folder；Amendment 8 起去除——WORKFLOW by-name 无 folder identity。）
+- WORKFLOW Excel 用**独立 9 列 schema（Amendment 9：id 后插入 `FRS ID`）**：`Task Type, orgId,
+  id, FRS ID, Task Name, updateTime, tasks.taskId, tasks.type, tasks.name`。父字段逐行重复。
+  （Amendment 8 曾为 8 列无 folder；Amendment 9 不重排 orgId/id，仅在 id 后插 FRS ID。）
 - 无 child 的 workflow 仍保留 1 行；detail 失败保留 1 fallback 行并计入 `rows`（按 `max(1,len)`）。
-- WORKFLOW `get-task` 输出不变。
+- WORKFLOW `get-task` 输出不变（扁平 detail，含 `id` + `frs_id`）。
 - `--type WORKFLOW` 单类型：单张 9 列 `Task Summary`。
-- **`--type ALL`：三张独立业务 sheet，固定顺序 `MTT Task`(22) → `DSS Tasks`(11)
-  → `Workflow Tasks`(8，Amendment 8) → `Export Errors`**（DSS 不再与 MTT 同表）。
+- **`--type ALL`：三张独立业务 sheet，固定顺序 `MTT Task`(23) → `DSS Tasks`(12)
+  → `Workflow Tasks`(9) → `Export Errors`**（DSS 不再与 MTT 同表）。
 
 ## DSS export 规则（Amendment 7）
 
-- DSS 用独立 **11 列** `DSS_HEADERS`（`@type, id, orgId, Task Name, Task Type, Task Updated On,
-  Source Connection, Source Object, Operation, Target Connection, Target Object`）；**1 task = 1 行**。
+- DSS 用独立 **12 列** `DSS_HEADERS`（Amendment 9：id 后含 `FRS ID`）：`@type, id, FRS ID, orgId,
+  Task Name, Task Type, Task Updated On, Source Connection, Source Object, Operation,
+  Target Connection, Target Object`；**1 task = 1 行**。`id`=classic、`FRS ID`=FRS object ID。
 - `Source Object` **只取 `sourceObjects[0].name`**（单值，不多值展开、不告警）。
-- DSS detail route **仍 `dsstask/name/{name}`**，不新增 API、不用 FRS object ID。
-- `get-task <name> DSS` 默认 compact（records=DSS_HEADERS）；`--full` 完整 detail。
+- DSS detail route **仍 `dsstask/name/{name}`**；folder 仅用于 FRS discovery 取 `frs_id`（回填）。
+- `get-task <name> DSS --folder <folder>` 默认 compact（records=DSS_HEADERS）；`--full` 完整 detail。
 
-## Selected Task Export（Amendment 6 / 8）
+## Selected Task Export（Amendment 6 / 9）
 
 - 用户给「混合 task 清单」时**不得**用 folder 全量 `export` 代替；整理成 JSON 调 `export-selected`。
-- **输入 schema 按类型（Amendment 8）**：MTT `{name, type, folder}`（folder 必需、非空）；
-  DSS / WORKFLOW `{name, type}`（**无 folder**）。DSS/WORKFLOW 的 `folder:""`/纯空白 → 归一化丢弃；
-  `folder:"非空"` → `SelectedTaskInputError` 快速失败（0 API、0 workbook、exit 1）。
-- 去重键按类型：MTT `(type, folder, name)`、DSS/WORKFLOW `(type, name)`；MTT 跨 folder 同名永不去重。
-## Mode A 构造 selected JSON 规则（Amendment 8）
+- **输入 schema 三类型统一（Amendment 9）**：`{name, type, folder}`，folder 对 **DSS / MTT /
+  WORKFLOW 都必需、trim 后非空**（folder 用于 FRS discovery 取 `frs_id`）。缺失/空白 folder →
+  `SelectedTaskInputError` 快速失败（0 API、0 workbook、exit 1）。selected 输入**不暴露**
+  `task_id` / `task_id_type`。
+- 去重键三类型统一 `(type, folder, name)`；跨 folder 同名（含 DSS/WORKFLOW）分属不同 FRS object，
+  **不去重、不 ambiguous_input 阻断**。
+- 每个 unique `(folder, type)` 只 discovery 一次（一次 `list_tasks`），取 `frs_id` 后直传 detail。
 
-用户提供的原始 List 可能对所有 task type（含 DSS/WORKFLOW）都填写了 folder 列。
+## Mode A 构造 selected JSON 规则（Amendment 9）
 
-Mode A **不得机械地把原始表格每一列原样复制到 JSON**，必须按 task type 转换为 Python
-正式输入 schema：
+用户提供的原始 List 含 name | type | folder 三列。三种类型都**保留 folder**：
 
-- **MTT**：folder 是真实定位/消歧参数，必须保留：
-  `{"name": "MTT_A", "type": "MTT", "folder": "Folder_A"}`
-  若 MTT 缺少 folder 或 folder 为空：不得调用 export-selected，向用户报告该 MTT 缺少
-  必需的 folder 信息。
+```json
+[
+  {"name": "DSS_A", "type": "DSS", "folder": "Folder_A"},
+  {"name": "MTT_A", "type": "MTT", "folder": "Folder_A"},
+  {"name": "WF_A",  "type": "WORKFLOW", "folder": "Folder_B"}
+]
+```
 
-- **DSS / WORKFLOW**：使用 V2 by-name 查询，folder 不属于 detail identity。即使原始行
-  填写了 folder，生成 JSON 时也必须删除该字段：
-  `{"name": "DSS_A", "type": "DSS"}` / `{"name": "WF_A", "type": "WORKFLOW"}`
-  不得写入 folder key（无论值是否为空）。
+- 三类型的 folder 都必需。若任一行（含 DSS/WORKFLOW）**缺 folder 或 folder 为空**：不得调用
+  export-selected，向用户报告该行缺少必需的 folder（现在必须通过 folder 取得 FRS ID）。
+- **不得**再执行 Amendment 8 的「DSS/WORKFLOW 自动删除 folder」规则。
 
 执行顺序：
 
 ```text
 1. 读取所有行，trim name/type/folder
 2. type 标准化为 DSS / MTT / WORKFLOW
-3. MTT：保留 folder；缺失/空 → 停止，报告给用户
-4. DSS / WORKFLOW：删除 folder（不判断是否非空，一律删除）
-5. 一次性生成 selected_tasks.json
-6. 调用 export-selected
-7. 读取 stdout summary
-8. 向用户报告结果
+3. 三类型均要求 folder；任一缺失/空 → 停止，报告给用户
+4. 一次性生成 selected_tasks.json（三类型都带 folder）
+5. 调用 export-selected
+6. 读取 stdout summary
+7. 向用户报告结果
 ```
 
-**用户沟通**：只要原始 List 中存在任何 DSS/WORKFLOW 行填写了非空
-folder，最终报告中**必须**包含类似说明：
+**用户沟通**：报告中必须说明 DSS / WORKFLOW 的 folder 语义：
 
-> "DSS / WORKFLOW 使用 by-name 查询，因此原始 List 中这些类型填写的 folder 不参与
-> detail identity；本次 selected JSON 已按正式 schema 自动忽略这些字段，同名对象
-> 跨 folder 的歧义风险仍无法被消除（详见 warnings）。"
+> "DSS / WORKFLOW 的 folder 用于 FRS discovery（可靠取得对应 FRS object 的 frs_id），
+> 但其 detail 仍走 V2 by-name；当组织内其它 folder 存在同名 task 时，by-name detail
+> 无法按 folder 消歧（详见 warnings）。MTT 的 folder 同时参与 detail 消歧。"
 
-- **get-task 同理**：DSS/WORKFLOW 不要向用户索要 folder、也不要自行补 `--folder`；MTT 仍需 folder。
+- **get-task 同理（Amendment 9）**：三类型都要向用户要 folder；缺失不要自行省略。
 - **不**逐条 `get-task` 把完整 detail 搬进 LLM 上下文；**不**自己生成 Excel；**不**自行统计
   success/failed —— 最终数量、失败、文件路径**以 Python summary（stdout JSON）为准**。
-- 必须向用户报告 DSS / WORKFLOW 的 by-name 跨 folder 同名风险（summary warnings 已含）；MTT 可按
-  folder 可靠消歧。
 - Python 正式输入**只接受 JSON**（Agent 可从 Excel/CSV/Markdown/粘贴文本整理出该 JSON）。
 - Agent = 输入理解 + 编排 + 报告；Python = validation/discovery/API/cache/parse/Excel/summary。
 

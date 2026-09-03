@@ -1,12 +1,16 @@
 """
-tools/selected_exporter.py — Selected Task List Export 编排层（Amendment 6）
+tools/selected_exporter.py — Selected Task List Export 编排层（Amendment 6 / 9）
 
-只读 integration layer：给定混合 task list（name/type/folder）→ 校验/标准化/去重 →
+只读 integration layer：给定 task list（name/type/folder）→ 校验/标准化/去重 →
 只查询 list 中指定的 task → 按类型分别导出 3 个独立 Excel → 返回 summary JSON。
 
-复用现有底层：get_task_detail（DSS by-name / WORKFLOW by-name / MTT FRS）、list_tasks
-（MTT folder discovery）、export_results（各类型 exporter / row builder / Export Errors /
-Connection·Mapping·Runtime 缓存）。本模块不重新实现任何 parser / exporter / resolver。
+Amendment 9：三类型统一 {name, type, folder}；每个 (folder, type) 只 discovery 一次
+（list_tasks），取 frs_id 后经 get_task_detail(task_id=frs_id, task_id_type="frs") 直传，
+不为每个 task 二次 discovery。去重键统一 (type, folder, name)。DSS/WORKFLOW 的 folder 用于
+FRS discovery，但 by-name detail 无法按 folder 消歧（见 summary warnings）。
+
+复用现有底层：get_task_detail、list_tasks、export_results（各类型 exporter / row builder /
+Export Errors / Connection·Mapping·Runtime 缓存）。本模块不重新实现任何 parser/exporter/resolver。
 
 安全边界：只 GET IICS API + 本地读 JSON / 写 Excel；无写操作；不打印 token。
 """
@@ -27,11 +31,9 @@ _SESSION_RUN_THRESHOLD = 5
 def validate_selected_tasks(raw):
     """校验并标准化 selected task 输入。返回 (normalized_list | None, input_errors)。
 
-    Amendment 8：folder 语义按类型区分。
-    - MTT：folder 是真实 identity/discovery 数据，必须存在、为字符串、trim 后非空。
-    - DSS / WORKFLOW：folder 在 detail 层不可用。允许缺省；若给出且 trim 后为空
-      （""/空白）→ 归一化丢弃 folder key；若给出非空值 → SelectedTaskInputError
-      快速失败（folder is only supported for MTT selected tasks），不触任何 API。
+    Amendment 9：三种类型统一要求 {name, type, folder}，folder 必须存在、为字符串、
+    trim 后非空（folder 用于 FRS discovery 取 frs_id）。任何缺失/空白 folder →
+    SelectedTaskInputError，先于任何 IICS API。selected 输入不暴露 task_id/task_id_type。
     """
     if not isinstance(raw, list):
         return None, [{"index": None, "field": None,
@@ -45,10 +47,10 @@ def validate_selected_tasks(raw):
                            "error_type": "SelectedTaskInputError",
                            "message": "item must be a JSON object"})
             continue
-        # name / type 为所有类型必需
+        # name / type / folder 三字段对所有类型均必需
         vals = {}
         bad = False
-        for f in ("name", "type"):
+        for f in ("name", "type", "folder"):
             if f not in item:
                 errors.append({"index": i, "field": f,
                                "error_type": "SelectedTaskInputError",
@@ -66,64 +68,35 @@ def validate_selected_tasks(raw):
         if bad:
             continue
         name = vals["name"].strip()
+        folder = vals["folder"].strip()
         ttype = vals["type"].strip().upper()
         if not name:
             errors.append({"index": i, "field": "name",
                            "error_type": "SelectedTaskInputError",
                            "message": "name must not be empty"})
             continue
+        if not folder:
+            errors.append({"index": i, "field": "folder",
+                           "error_type": "SelectedTaskInputError",
+                           "message": "folder must not be empty"})
+            continue
         if ttype not in _VALID_TYPES:
             errors.append({"index": i, "field": "type",
                            "error_type": "SelectedTaskInputError",
                            "message": "type must be DSS, MTT, or WORKFLOW"})
             continue
-
-        if ttype == "MTT":
-            if "folder" not in item:
-                errors.append({"index": i, "field": "folder",
-                               "error_type": "SelectedTaskInputError",
-                               "message": "folder is required for MTT selected tasks"})
-                continue
-            fv = item.get("folder")
-            if not isinstance(fv, str):
-                errors.append({"index": i, "field": "folder",
-                               "error_type": "SelectedTaskInputError",
-                               "message": "folder must be a string"})
-                continue
-            folder = fv.strip()
-            if not folder:
-                errors.append({"index": i, "field": "folder",
-                               "error_type": "SelectedTaskInputError",
-                               "message": "folder must not be empty for MTT selected tasks"})
-                continue
-            out.append({"name": name, "type": ttype, "folder": folder})
-        else:
-            # DSS / WORKFLOW：folder 可缺省；给出非空值即快速失败
-            if "folder" in item and item.get("folder") is not None:
-                fv = item.get("folder")
-                if not isinstance(fv, str):
-                    errors.append({"index": i, "field": "folder",
-                                   "error_type": "SelectedTaskInputError",
-                                   "message": "folder must be a string"})
-                    continue
-                if fv.strip():
-                    errors.append({"index": i, "field": "folder",
-                                   "error_type": "SelectedTaskInputError",
-                                   "message": "folder is only supported for MTT "
-                                              "selected tasks"})
-                    continue
-                # 空白 folder → 归一化丢弃
-            out.append({"name": name, "type": ttype})
+        out.append({"name": name, "type": ttype, "folder": folder})
     if errors:
         return None, errors
     return out, []
 
 
 def _selection_identity(item):
-    """去重身份键：MTT 用 (type, folder, name)；DSS / WORKFLOW 用 (type, name)。"""
-    if item["type"] == "MTT":
-        return (item["type"], item.get("folder", ""), item["name"])
-    return (item["type"], item["name"])
+    """去重身份键（Amendment 9）：三种类型统一 (type, folder, name)。
+
+    跨 folder 同名（含 DSS/WORKFLOW）分属不同 FRS object，不去重、不 ambiguous_input 阻断。
+    """
+    return (item["type"], item.get("folder", ""), item["name"])
 
 
 def _dedup(tasks):
@@ -139,13 +112,14 @@ def _dedup(tasks):
     return out
 
 
-# ── MTT folder discovery ─────────────────────────────────────────────────────
-def build_mtt_discovery_index(client, folder):
-    """对单个 folder 执行一次 list_tasks(folder, MTT)，建立 name → [candidates]。
+# ── folder discovery（Amendment 9：三类型共用）──────────────────────────────
+def build_discovery_index(client, folder, task_type):
+    """对单个 (folder, task_type) 执行一次 list_tasks，建立 name → [candidates]。
 
+    三种类型共用（每个 unique (folder, type) 只调用一次 list_tasks）。
     返回 (index, error)：error 非 None 表示该 folder discovery 失败。
     """
-    listed = list_tasks(client, folder_path=folder, task_type="MTT")
+    listed = list_tasks(client, folder_path=folder, task_type=task_type)
     if isinstance(listed, dict) and "error" in listed:
         return {}, {"error_type": listed.get("error_type", ""),
                     "error": listed.get("error", "")}
@@ -173,41 +147,24 @@ def _write_type(client, ttype, details, failed_local, output_dir, ts):
     return res.get("rows", 0), res.get("file_path"), res.get("enrichment_warnings_count", 0)
 
 
-def _process_by_name(client, ttype, tuples, failures, output_dir, ts):
-    """DSS / WORKFLOW：纯 by-name detail（Amendment 8：无 folder，无 ambiguity 分支）。"""
-    requested = len(tuples)
-    if requested == 0:
-        return _empty_result()
-    details = []
-    failed_local = []
-    for t in tuples:
-        d = get_task_detail(client, task_name=t["name"], task_type=ttype)
-        if isinstance(d, dict) and "error" in d:
-            f = {"type": ttype, "name": t["name"],
-                 "error_type": d.get("error_type", ""), "error": d.get("error", "")}
-            failed_local.append(f)
-            failures.append(f)
-            continue
-        details.append(d)
-    rows, file_path, enrich = _write_type(client, ttype, details, failed_local,
-                                          output_dir, ts)
-    success = len(details)
-    return {"requested": requested, "success": success,
-            "failed": requested - success, "rows": rows,
-            "enrichment_warnings_count": enrich, "file_path": file_path}
+def _process_type(client, ttype, tuples, failures, output_dir, ts):
+    """三类型统一处理（Amendment 9）：每 (folder, type) 一次 discovery → frs_id →
+    detail 直传（task_id=frs_id, task_id_type="frs"，跳过二次 discovery）。
 
-
-def _process_mtt(client, tuples, failures, output_dir, ts):
-    """MTT：每 folder 一次 discovery → name index → FRS object ID → 现有 FRS detail。"""
+    - MTT：get_task_detail(task_type, task_id=frs_id, task_id_type="frs")，回填 name/location。
+    - DSS/WORKFLOW：get_task_detail(task_name=name, task_type, task_id=frs_id,
+      task_id_type="frs")，by-name detail + frs_id 回填。
+    """
     requested = len(tuples)
     if requested == 0:
         return _empty_result()
 
+    # 按 folder 分组，每个 unique folder 只 discovery 一次（一次 list_tasks 调用）
     folders = list(OrderedDict((t["folder"], None) for t in tuples).keys())
     index_by_folder = {}
     error_by_folder = {}
     for folder in folders:
-        idx, err = build_mtt_discovery_index(client, folder)
+        idx, err = build_discovery_index(client, folder, ttype)
         index_by_folder[folder] = idx
         error_by_folder[folder] = err
 
@@ -217,7 +174,7 @@ def _process_mtt(client, tuples, failures, output_dir, ts):
         folder, name = t["folder"], t["name"]
         ferr = error_by_folder.get(folder)
         if ferr:
-            f = {"type": "MTT", "folder": folder, "name": name,
+            f = {"type": ttype, "folder": folder, "name": name,
                  "error_type": ferr.get("error_type", ""),
                  "error": ferr.get("error", "")}
             failed_local.append(f)
@@ -225,38 +182,43 @@ def _process_mtt(client, tuples, failures, output_dir, ts):
             continue
         cands = index_by_folder.get(folder, {}).get(name, [])
         if len(cands) == 0:
-            f = {"type": "MTT", "folder": folder, "name": name,
+            f = {"type": ttype, "folder": folder, "name": name,
                  "error_type": "selected_task_not_found",
-                 "error": "Selected MTT task was not found in the given folder."}
+                 "error": f"Selected {ttype} task was not found in the given folder."}
             failed_local.append(f)
             failures.append(f)
             continue
         if len(cands) > 1:
-            f = {"type": "MTT", "folder": folder, "name": name,
-                 "error_type": "ambiguous_mtt",
-                 "error": "Multiple MTT candidates matched the same name in the folder.",
-                 "candidates": [{"id": c.get("id", ""), "path": c.get("path", ""),
+            # 同一 folder 内 discovery 无法唯一确定 FRS object（非跨 folder 同名问题）
+            f = {"type": ttype, "folder": folder, "name": name,
+                 "error_type": "ambiguous_task",
+                 "error": f"Multiple {ttype} candidates matched the same name in the folder.",
+                 "candidates": [{"frs_id": c.get("frs_id", ""), "path": c.get("path", ""),
                                  "name": c.get("name", ""), "type": c.get("type", "")}
                                 for c in cands]}
             failed_local.append(f)
             failures.append(f)
             continue
-        frs_id = cands[0].get("id", "")
-        d = get_task_detail(client, task_type="MTT", task_id=frs_id,
-                            task_id_type="frs")
+        frs_id = cands[0].get("frs_id", "")
+        if ttype == "MTT":
+            d = get_task_detail(client, task_type="MTT", task_id=frs_id,
+                                task_id_type="frs")
+        else:
+            d = get_task_detail(client, task_name=name, task_type=ttype,
+                                task_id=frs_id, task_id_type="frs")
         if isinstance(d, dict) and "error" in d:
-            f = {"type": "MTT", "folder": folder, "name": name,
+            f = {"type": ttype, "folder": folder, "name": name,
                  "error_type": d.get("error_type", ""), "error": d.get("error", "")}
             failed_local.append(f)
             failures.append(f)
             continue
         if not d.get("task_name"):
             d["task_name"] = name
-        if not d.get("task_location"):
+        if ttype == "MTT" and not d.get("task_location"):
             d["task_location"] = folder
         details.append(d)
 
-    rows, file_path, enrich = _write_type(client, "MTT", details, failed_local,
+    rows, file_path, enrich = _write_type(client, ttype, details, failed_local,
                                           output_dir, ts)
     success = len(details)
     return {"requested": requested, "success": success,
@@ -302,21 +264,24 @@ def export_selected_tasks(client, selected_tasks, output_dir):
 
     failures = []
     results = {}
-    results["DSS"] = _process_by_name(client, "DSS", by_type["DSS"],
-                                      failures, output_dir, ts)
-    results["MTT"] = _process_mtt(client, by_type["MTT"], failures, output_dir, ts)
-    results["WORKFLOW"] = _process_by_name(client, "WORKFLOW", by_type["WORKFLOW"],
-                                           failures, output_dir, ts)
+    results["DSS"] = _process_type(client, "DSS", by_type["DSS"],
+                                   failures, output_dir, ts)
+    results["MTT"] = _process_type(client, "MTT", by_type["MTT"],
+                                   failures, output_dir, ts)
+    results["WORKFLOW"] = _process_type(client, "WORKFLOW", by_type["WORKFLOW"],
+                                        failures, output_dir, ts)
 
     warnings = []
     if by_type["DSS"]:
-        warnings.append("DSS details are resolved by name only; folder identity is "
-                        "unavailable and duplicate names elsewhere in the organization "
-                        "cannot be disambiguated.")
+        warnings.append("DSS details are resolved by name only. The supplied folder is "
+                        "used to resolve the FRS ID, but it does not disambiguate the V2 "
+                        "detail response when duplicate names exist elsewhere in the "
+                        "organization.")
     if by_type["WORKFLOW"]:
-        warnings.append("WORKFLOW details are resolved by name only; folder identity is "
-                        "unavailable and duplicate names elsewhere in the organization "
-                        "cannot be disambiguated.")
+        warnings.append("WORKFLOW details are resolved by name only. The supplied folder "
+                        "is used to resolve the FRS ID, but it does not disambiguate the "
+                        "V2 detail response when duplicate names exist elsewhere in the "
+                        "organization.")
     warnings.extend(_session_warnings(failures))
 
     return {

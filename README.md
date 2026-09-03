@@ -160,7 +160,7 @@ echo $LASTEXITCODE
 $env:IICS_SESSION_TOKEN = "<USER_SESSION の値>"
 
 python iics_cli.py list-tasks JAPAN_SCRM_DI --type DSS
-python iics_cli.py get-task DI_FACT_SALES_DAILY DSS
+python iics_cli.py get-task DI_FACT_SALES_DAILY DSS --folder JAPAN_SCRM_DI
 python iics_cli.py resolve-connection 000LVU0B000000000015
 python iics_cli.py export JAPAN_COMMERCIAL_DWH --type ALL
 ```
@@ -199,7 +199,7 @@ claude `
 | 指示例 | Claude Code CLI が実行するコマンド |
 |------|--------------------------|
 | 「JAPAN_SCRM_DI の DSS task を一覧して」 | `python iics_cli.py list-tasks JAPAN_SCRM_DI --type DSS` |
-| 「DI_FACT_SALES_DAILY という DSS の詳細を見せて」 | `python iics_cli.py get-task DI_FACT_SALES_DAILY DSS` |
+| 「DI_FACT_SALES_DAILY という DSS の詳細を見せて」 | `python iics_cli.py get-task DI_FACT_SALES_DAILY DSS --folder JAPAN_SCRM_DI` |
 | 「この connection id を名前に解決して」 | `python iics_cli.py resolve-connection 000LVU...` |
 | 「JAPAN_COMMERCIAL_DWH の全 task を Excel に出力して」 | `python iics_cli.py export JAPAN_COMMERCIAL_DWH --type ALL` |
 
@@ -234,7 +234,7 @@ python iics_cli.py list-tasks JAPAN_SCRM_DI --type DSS
   "folder": "JAPAN_SCRM_DI",
   "count": 847,
   "tasks": [
-    {"name": "DI_FACT_SALES_DAILY", "type": "DSS", "id": "...", "status": ""},
+    {"name": "DI_FACT_SALES_DAILY", "type": "DSS", "frs_id": "...", "status": ""},
     ...
   ]
 }
@@ -252,13 +252,13 @@ python iics_cli.py get-task <task_name> <task_type> [--folder PATH] [--no-resolv
 |------|------|------|
 | `<task_name>` | 必須 | task 名 |
 | `<task_type>` | 必須 | `DSS` / `MTT` / `WORKFLOW` |
-| `--folder` | **MTT のみ必須** | MTT は FRS ID 特定に必須。**DSS / WORKFLOW は非対応**（非空を渡すと `UnsupportedArgumentError`、Amendment 8） |
+| `--folder` | **三種別とも必須**（Amendment 9） | FRS discovery で `frs_id` を取得。MTT は folder が detail 消歧にも寄与。DSS / WORKFLOW の folder は FRS discovery 専用で、V2 by-name detail の folder 消歧はできない。欠落 → `MissingFolderError` |
 | `--no-resolve` | 任意 | connection ID → 名前の解決をスキップし、ID のみ表示 |
 
 例：
 
 ```powershell
-python iics_cli.py get-task DI_FACT_SALES_DAILY DSS
+python iics_cli.py get-task DI_FACT_SALES_DAILY DSS --folder JAPAN_SCRM_DI
 ```
 
 戻り値：
@@ -267,6 +267,8 @@ python iics_cli.py get-task DI_FACT_SALES_DAILY DSS
 {
   "name": "DI_FACT_SALES_DAILY",
   "type": "DSS",
+  "id": "000LVU0I0000000004TZ",
+  "frs_id": "fABfm4RCYqVfuVEi9e8BGb",
   "runtime_environment": {"id": null, "name": ""},
   "source_connection": {"id": "000LVU0B000000000015", "name": "SCRM_ORA_STDB"},
   "target_connection": {"id": "000LVU0B00000000009O", "name": "mysql_scrm_hnn_api"},
@@ -274,7 +276,7 @@ python iics_cli.py get-task DI_FACT_SALES_DAILY DSS
 }
 ```
 
-> **DSS `get-task` は既定で compact**（DSS Excel 11 列と一致）：`{task_count:1, rows:1, records:[{11 項目}]}` を返します。`--full` で上記の完全 detail を返します（上の JSON は `--full` の形）。`runtime_environment.name` は DSS では常に空（DSS 詳細 API が返さない、プラットフォーム制約でバグではない）。
+> **DSS `get-task` は既定で compact**（DSS Excel 12 列と一致）：`{task_count:1, rows:1, records:[{12 項目}]}` を返します。`--full` で上記の完全 detail を返します（上の JSON は `--full` の形）。`runtime_environment.name` は DSS では常に空（DSS 詳細 API が返さない、プラットフォーム制約でバグではない）。
 >
 > **MTT 詳細は増強済み**：MTT は公式 FRS 経路を使い、DSS/WORKFLOW と異なる構造を返します——トップレベルに `id`（classic V2 ID）、`frs_id`（V3/FRS ID）、`detail_route`、`runtime_environment{id,name}`、`task_mapping{id,name,location,updated_on}`（`location` は現状空）、`transformations[]`（MTT parameters のみ由来）、`enrichment_warnings[]`。
 >
@@ -284,7 +286,7 @@ python iics_cli.py get-task DI_FACT_SALES_DAILY DSS
 > python .\iics_cli.py get-task TASK_NAME MTT --folder JAPAN_SCRM_BAU
 > ```
 >
-> MTT は `--id` の直接指定に対応しません。**DSS / WORKFLOW は `--folder` 非対応**（Amendment 8）：詳細は name のみで解決され、detail 層に信頼できる folder identity が存在しません。非空の `--folder` を渡すと `UnsupportedArgumentError`（HTTP 発行前）。folder は `list-tasks` / `export` の**列挙範囲**としてのみ使用します。
+> MTT は `--id` の直接指定に対応しません。**Amendment 9：DSS / WORKFLOW も `--folder` が必須**になりました。folder は FRS discovery で `frs_id` を取得するために使われ、返り値には `id`（classic）と `frs_id`（FRS）の両方が入ります。ただし DSS / WORKFLOW の detail は依然 V2 by-name（`dsstask/name/{name}` / `workflow/name/{name}`）で解決されるため、**folder は FRS object の特定はできても、by-name detail が同一オブジェクトである保証まではできません**（組織内に同名 task があると by-name では folder 消歧不可）。これは ID 体系の対応関係の問題ではなく、by-name endpoint の制約です。
 
 **MTT `get-task` の既定出力（運用向け）** は Excel `Task Summary` と同じ業務フィールドのみ、transformation 1 件 = record 1 件：
 
@@ -368,9 +370,11 @@ Excel は 2 つの sheet を含みます（旧 `Field Mapping` / `Truncation Ris
 
 | 種別 | 列数 | 行モデル | 列 |
 |------|-----:|--------|----|
-| **DSS** | 11 | 1 task = 1 行 | `@type, id, orgId, Task Name, Task Type, Task Updated On, Source Connection, Source Object, Operation, Target Connection, Target Object` |
-| **MTT** | 22 | 各 Source/Target transformation = 1 行 | `@type, id, orgId, Task Name, Task Type, Task Location, Runtime Environment, Task Updated On, Mapping Name, Mapping Updated On, Transformation Name, Source Connection, Source Object, Custom Query, Target Connection, Operation, Target Object, Parameter File Directory, Parameter File Name, Pre-Processing Commands, Post-Processing Commands, Status` |
-| **WORKFLOW** | 8 | 各 `tasks[]` child = 1 行 | `Task Type, orgId, id, Task Name, updateTime, tasks.taskId, tasks.type, tasks.name`（Amendment 8：`folder` 列を削除） |
+| **DSS** | 12 | 1 task = 1 行 | `@type, id, FRS ID, orgId, Task Name, Task Type, Task Updated On, Source Connection, Source Object, Operation, Target Connection, Target Object` |
+| **MTT** | 23 | 各 Source/Target transformation = 1 行 | `@type, id, FRS ID, orgId, Task Name, Task Type, Task Location, Runtime Environment, Task Updated On, Mapping Name, Mapping Updated On, Transformation Name, Source Connection, Source Object, Custom Query, Target Connection, Operation, Target Object, Parameter File Directory, Parameter File Name, Pre-Processing Commands, Post-Processing Commands, Status` |
+| **WORKFLOW** | 9 | 各 `tasks[]` child = 1 行 | `Task Type, orgId, id, FRS ID, Task Name, updateTime, tasks.taskId, tasks.type, tasks.name`（Amendment 9：`id` の後に `FRS ID` を追加） |
+
+> **Amendment 9：`id` = classic V2 ID、`FRS ID` = FRS object ID（V3 discovery）**。三種別とも両方を出力します。
 
 単一種別の出力（`--type DSS` / `--type MTT` / `--type WORKFLOW`）は業務 sheet 名が `Task Summary`、加えて `Export Errors`（エラー/警告、両方無ければ 1 行 `No export errors`）。DSS の `Source Object` は `sourceObjects[0].name` のみ（単値、展開しない）。
 
@@ -382,7 +386,7 @@ Excel は 2 つの sheet を含みます（旧 `Field Mapping` / `Truncation Ris
 python .\iics_cli.py export JAPAN_SCRM_DI --type WORKFLOW --format excel
 ```
 
-WORKFLOW の `Task Summary` は**専用 8 列**：`Task Type, orgId, id, Task Name, updateTime, tasks.taskId, tasks.type, tasks.name`（Amendment 8 で `folder` 列を削除——WORKFLOW は name のみで解決され、detail 層に folder identity が無いため）。
+WORKFLOW の `Task Summary` は**専用 9 列**：`Task Type, orgId, id, FRS ID, Task Name, updateTime, tasks.taskId, tasks.type, tasks.name`（Amendment 9 で `id` の後に `FRS ID` を追加。`orgId/id` の並びは変更なし）。
 
 **各 workflow の `tasks[]` child が 1 行ずつ**展開され、親フィールド（`Task Type` / `orgId` / `id` / `Task Name` / `updateTime`）は各行に繰り返し、child フィールド（`tasks.taskId` / `tasks.type` / `tasks.name`）を個別表示します。例：
 
@@ -392,7 +396,7 @@ WORKFLOW の `Task Summary` は**専用 8 列**：`Task Type, orgId, id, Task Na
 
 child task が無い workflow も 1 行残します（child 3 列は空）。WORKFLOW export は child の MTT/DSS 詳細を照会しません。**WORKFLOW `get-task` の出力は不変**（従来のフラット detail）。
 
-> `--type ALL` の出力は 3 つの独立業務 sheet（固定順）：**`MTT Task`（22 列）→ `DSS Tasks`（11 列）→ `Workflow Tasks`（8 列、Amendment 8）**、加えて `Export Errors`。各種別が自分の schema を使い、DSS は MTT と同表になりません。
+> `--type ALL` の出力は 3 つの独立業務 sheet（固定順）：**`MTT Task`（23 列）→ `DSS Tasks`（12 列）→ `Workflow Tasks`（9 列、Amendment 9）**、加えて `Export Errors`。各種別が自分の schema を使い、DSS は MTT と同表になりません。
 
 ### 4b. `export-selected` — 指定した Task List のみ出力
 
@@ -402,24 +406,25 @@ child task が無い workflow も 1 行残します（child 3 列は空）。WOR
 python .\iics_cli.py export-selected --input .\selected_tasks.json --output-dir .\exports
 ```
 
-入力は JSON 配列。**種別で schema が異なります（Amendment 8）**：MTT は `{name, type, folder}`（`folder` 必須・非空）、DSS / WORKFLOW は `{name, type}`（**folder 無し**）:
+入力は JSON 配列。**Amendment 9：三種別とも `{name, type, folder}`**（`folder` は全種別で必須・trim 後非空。folder は FRS discovery に使用）:
 
 ```json
 [
-  {"name": "Task_A",     "type": "DSS"},
+  {"name": "Task_A",     "type": "DSS",      "folder": "JAPAN_SCRM_DI"},
   {"name": "Task_B",     "type": "MTT",      "folder": "JAPAN_SCRM_BAU"},
-  {"name": "Workflow_A", "type": "WORKFLOW"}
+  {"name": "Workflow_A", "type": "WORKFLOW", "folder": "JAPAN_COMMERCIAL_DWH"}
 ]
 ```
 
-> DSS / WORKFLOW で `folder:""`（空文字/空白）は無視して正規化されますが、**非空の folder を渡すと `SelectedTaskInputError` で即失敗**（API 呼び出し・workbook 生成ゼロ、exit 1）——DSS / WORKFLOW は name のみで解決され folder identity を持たないためです。
+> `folder` が欠落・空白の行があると **`SelectedTaskInputError` で即失敗**（API 呼び出し・workbook 生成ゼロ、exit 1）。selected 入力に `task_id` / `task_id_type` は指定できません。
 
 動作: 種別ごとに **独立した 3 つの Excel**（`selected_DSS_*.xlsx` / `selected_MTT_*.xlsx` / `selected_WORKFLOW_*.xlsx`、同一タイムスタンプ）を生成。ある種別のリストが空なら該当ファイルは生成しません。stdout には小さな summary JSON（`input_count / unique_count / duplicates_removed`、種別ごとの `requested/success/failed/rows/file_path`、`failures[]`、`warnings[]`）を返し、**完全な detail は含めません**。
 
 主な制約:
 
-- **DSS / WORKFLOW は名前照会**: detail 層に folder identity が無く、組織内の別 folder に同名があっても曖昧さを解消できません（summary warning で通知）。dedup キーは `(type, name)`。
-- **MTT は folder で確実に区別可能**（V3 で FRS object ID を特定）、フォルダをまたいだ同名も問題なし。dedup キーは `(type, folder, name)`——MTT の同名は folder が異なれば別 task として保持。
+- **DSS / WORKFLOW**（Amendment 9）: folder で FRS object を特定し `frs_id` を取得しますが、detail は V2 by-name のため、組織内の別 folder に同名があると by-name detail の folder 消歧はできません（summary warning で通知）。
+- **MTT は folder で確実に区別可能**（V3 で FRS object ID を特定、detail 消歧にも寄与）。
+- dedup キーは三種別とも `(type, folder, name)`——folder が異なる同名は別 FRS object として保持（ambiguous_input でブロックしません）。
 - 個別 task の失敗は全体を中断しません。入力 JSON 自体が不正な場合のみ全体失敗（exit 1）。
 
 > Mode A（Claude Code）は Excel / CSV / Markdown 表 / 貼り付けテキストから上記 JSON を作成して呼び出せますが、Python の正式入力は **JSON のみ**。最終集計は summary を正とします。
@@ -488,7 +493,7 @@ python smoke_test.py
 - **同名 task をフォルダ間で確実に区別できない**：必ず `--folder` を付けてください。
 - **MTT / WORKFLOW の runtime / connection フィールド構造は未検証**：v0.1 は主に DSS で完全なフィールド検証を実施。
 - **Token は自動更新されない**：失効後はブラウザから手動で再取得が必要。
-- **Excel は種別ごとに専用 schema**：DSS 11 列 / MTT 22 列 / WORKFLOW 8 列（Amendment 8）+ `Export Errors`；`--type ALL` は `MTT Task` / `DSS Tasks` / `Workflow Tasks` の 3 業務 sheet。MTT/WORKFLOW は複数行に展開され、`task_count` と `rows` は分離。
+- **Excel は種別ごとに専用 schema**：DSS 12 列 / MTT 23 列 / WORKFLOW 9 列（Amendment 9：各 `id` の後に `FRS ID`）+ `Export Errors`；`--type ALL` は `MTT Task` / `DSS Tasks` / `Workflow Tasks` の 3 業務 sheet。MTT/WORKFLOW は複数行に展開され、`task_count` と `rows` は分離。
 
 ---
 
@@ -502,7 +507,7 @@ python smoke_test.py
 | `{"error":"IICS_SESSION_TOKEN 未設定"}`、終了コード 1 | 環境変数が未設定、または新しいウィンドウ | `$env:IICS_SESSION_TOKEN = "..."` を再設定 |
 | `RuntimeError: IICS session expired...` | Token 失効（401） | ブラウザで `USER_SESSION` を再取得し設定し直す |
 | `list-tasks` が `{"error":...}` を返す | フォルダ名の誤り | 3 つの `JAPAN_*` のいずれかか確認 |
-| `get-task` の結果が期待した task と異なる | 同名 task のフォルダ間曖昧さ | **MTT** は `--folder` を付与（FRS ID で確実に区別）。**DSS / WORKFLOW** は name のみで解決され `--folder` 非対応——組織内同名は区別不可（既知の制約） |
+| `get-task` の結果が期待した task と異なる | 同名 task のフォルダ間曖昧さ | 三種別とも `--folder` は必須（Amendment 9）。**MTT** は folder で確実に区別。**DSS / WORKFLOW** は folder で FRS object を特定できるが detail は by-name のため、組織内同名は by-name 消歧不可（既知の制約） |
 | Excel が開けない / sheet 欠落 | `openpyxl` の導入不良、または書き込み失敗 | `py -m pip install -r requirements.txt` を再実行し、ディレクトリの書き込み権限を確認 |
 | Claude Code 起動コマンドが構文エラー | PowerShell でバックスラッシュ `\` を継続行に使用 | PowerShell はバッククォート `` ` `` を使用。バックスラッシュ継続は Bash/WSL のみ有効 |
 | stdout に非 JSON が混入 | 発生してはならない不具合 | 完全なコマンドと出力を添えて開発者へ報告 |

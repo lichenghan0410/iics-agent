@@ -21,9 +21,10 @@ from pathlib import Path
 from openpyxl import Workbook
 from openpyxl.styles import Alignment
 
-# MTT 专属 Task Summary 列（Amendment 4：22 列；Amendment 7 起正式收窄为 MTT 专属）
+# MTT 专属 Task Summary 列（Amendment 9：23 列，id 后插入 FRS ID）
+# id = classic V2 ID；FRS ID = FRS object ID（V3 discovery）。
 MTT_HEADERS = [
-    "@type", "id", "orgId",
+    "@type", "id", "FRS ID", "orgId",
     "Task Name", "Task Type", "Task Location", "Runtime Environment",
     "Task Updated On",
     "Mapping Name", "Mapping Updated On",
@@ -36,9 +37,9 @@ MTT_HEADERS = [
 _COLS = MTT_HEADERS  # 内部私有别名（过渡）；对外/跨文件一律用 MTT_HEADERS
 _SOURCE_OBJECT_COL = MTT_HEADERS.index("Source Object")  # 0-based；用于 wrap text
 
-# DSS 专属 Task Summary 列（Amendment 7：独立 11 列，1 task = 1 row）
+# DSS 专属 Task Summary 列（Amendment 9：12 列，id 后插入 FRS ID，1 task = 1 row）
 DSS_HEADERS = [
-    "@type", "id", "orgId",
+    "@type", "id", "FRS ID", "orgId",
     "Task Name", "Task Type", "Task Updated On",
     "Source Connection", "Source Object", "Operation",
     "Target Connection", "Target Object",
@@ -46,13 +47,14 @@ DSS_HEADERS = [
 
 _EXPORT_ERROR_HEADERS = ["level", "task_name", "task_type", "folder", "error_type", "error"]
 
-# WORKFLOW 专用 Task Summary 列（Amendment 5；Amendment 8 起去 folder → 8 列）——
-# 命名风格（Task Type / orgId / ...）与通用列有意不同，不与 MTT/DSS 对齐。
-# folder 移除原因：WORKFLOW by-name detail 无可靠 folder identity，folder 仅是枚举范围。
+# WORKFLOW 专用 Task Summary 列（Amendment 9：9 列，id 后插入 FRS ID）——
+# 命名风格（Task Type / orgId / id / ...）与 MTT/DSS 有意不同，不重排 orgId/id。
+# id = classic V2 ID；FRS ID = FRS object ID（V3 discovery）。
 WORKFLOW_HEADERS = [
     "Task Type",
     "orgId",
     "id",
+    "FRS ID",
     "Task Name",
     "updateTime",
     "tasks.taskId",
@@ -157,6 +159,7 @@ def _task_level_row(rec: dict, top_folder: str) -> dict:
     row = {c: "" for c in MTT_HEADERS}
     row["@type"] = rec.get("@type", "")
     row["id"] = rec.get("id", "")
+    row["FRS ID"] = rec.get("frs_id", "")   # Amendment 9：FRS object ID
     row["orgId"] = rec.get("orgId", "")
     row["Task Name"] = name
     row["Task Type"] = ttype
@@ -183,7 +186,7 @@ def _task_level_row(rec: dict, top_folder: str) -> dict:
 
 
 def build_task_summary_rows(rec: dict, top_folder: str = "") -> list:
-    """一条 normalized detail / task 记录 → 若干 Task Summary 行（22 列 dict）。
+    """一条 normalized detail / task 记录 → 若干 Task Summary 行（23 列 dict）。
 
     CLI 的 MTT compact get-task 与 Excel export 共用此 row builder，保证字段/值一致。
     对侧不适用字段（情形 B）填 ""；缺失的可选字段（情形 A）保持 None。
@@ -220,10 +223,10 @@ def build_task_summary_rows(rec: dict, top_folder: str = "") -> list:
 
 
 def build_workflow_summary_rows(rec: dict) -> list:
-    """WORKFLOW 记录 → 若干 8 列 row dict（一个 raw.tasks[] child = 一行）。
+    """WORKFLOW 记录 → 若干 9 列 row dict（一个 raw.tasks[] child = 一行）。
 
-    - 父字段权威来源为 workflow V2 payload（rec["raw"]）。
-    - Amendment 8：WORKFLOW by-name detail 无可靠 folder identity，不再输出 folder 列。
+    - 父字段权威来源为 workflow V2 payload（rec["raw"]）；id=classic V2 ID。
+    - Amendment 9：新增 FRS ID 列（rec["frs_id"]，folder-scoped V3 discovery）。
     - tasks 为空/缺失/非 list → 保留 1 行，child 三列为 ""。
     - child 字段缺失 → ""（非 failed / 非 enrichment failure）。
     - 不查询任何 child detail（只读 raw.tasks[]）。
@@ -233,6 +236,7 @@ def build_workflow_summary_rows(rec: dict) -> list:
         "Task Type": "WORKFLOW",
         "orgId": raw.get("orgId", ""),
         "id": raw.get("id", ""),
+        "FRS ID": rec.get("frs_id", ""),
         "Task Name": raw.get("name") or rec.get("name") or rec.get("task_name") or "",
         "updateTime": raw.get("updateTime", ""),
     }
@@ -272,15 +276,17 @@ def _dss_source_object(raw: dict) -> str:
 
 
 def build_dss_summary_rows(rec: dict, folder_path: str = "") -> list:
-    """DSS 记录 → 恰 1 行（11 列 dict）。CLI compact 与 Excel 共用此 row builder。
+    """DSS 记录 → 恰 1 行（12 列 dict）。CLI compact 与 Excel 共用此 row builder。
 
-    folder_path 仅为统一接口保留；DSS 11 列不输出 folder。Source/Target Connection 直接复用
-    detail 中已解析好的 name（不在此发 API）；raw 字段缺失 best-effort 空值。
+    folder_path 仅为统一接口保留；DSS 12 列不输出 folder。id=classic V2 ID（by-name
+    response），FRS ID=frs_id（folder-scoped V3 discovery）。Source/Target Connection
+    直接复用 detail 中已解析好的 name（不在此发 API）；raw 字段缺失 best-effort 空值。
     """
     raw = rec.get("raw") if isinstance(rec.get("raw"), dict) else {}
     row = {
         "@type": raw.get("@type", ""),
         "id": raw.get("id", ""),
+        "FRS ID": rec.get("frs_id", ""),
         "orgId": raw.get("orgId", ""),
         "Task Name": rec.get("name") or rec.get("task_name") or raw.get("name", ""),
         "Task Type": "DSS",
@@ -367,8 +373,8 @@ def export_results(
 ) -> dict:
     """导出为 Excel（Task Summary + Export Errors）/ JSON。client 未使用，保留契约。
 
-    export_type == "WORKFLOW" 时 Task Summary 使用 8 列 WORKFLOW 专用 schema（child 展开，
-    Amendment 8 起无 folder 列）；其它（含 ALL / DSS / MTT）沿用各自 schema，行为不变。
+    export_type == "WORKFLOW" 时 Task Summary 使用 9 列 WORKFLOW 专用 schema（child 展开，
+    Amendment 9 起含 FRS ID 列）；其它（含 ALL / DSS / MTT）沿用各自 schema，行为不变。
     """
     try:
         if format not in ("excel", "json"):
@@ -424,7 +430,7 @@ def export_results(
             business_sheets = [("Task Summary", DSS_HEADERS, _dss_rows(records))]
         elif export_type == "ALL":
             # ALL（Amendment 7）：三个独立业务 sheet，固定顺序
-            # MTT Task(22) → DSS Tasks(11) → Workflow Tasks(8)，再 Export Errors
+            # MTT Task(23) → DSS Tasks(12) → Workflow Tasks(9)，再 Export Errors
             mtt_recs = [r for r in records if _is_mtt(r)]
             dss_recs = [r for r in records if _is_dss(r)]
             wf_recs = [r for r in records if _is_wf(r)]

@@ -527,7 +527,7 @@ Session token:
 
 使用示例（Mode A 下由 Claude Code CLI 自动生成；Mode C 下由运维人员手动输入，命令完全一致）:
   python iics_cli.py list-tasks JAPAN_SCRM_DI --type DSS
-  python iics_cli.py get-task DI_FACT_SALES_DAILY DSS   # Amendment 8：DSS/WORKFLOW 不带 --folder
+  python iics_cli.py get-task DI_FACT_SALES_DAILY DSS --folder JAPAN_SCRM_DI   # Amendment 9：三类型均需 --folder
   python iics_cli.py resolve-connection 000LVU0B000000000015
   python iics_cli.py export JAPAN_COMMERCIAL_DWH --type DSS
 """
@@ -1229,6 +1229,11 @@ DSS compact/full、MTT/WORKFLOW get-task 回归、selected DSS 11 列、connecti
 
 ## Amendment 8 — DSS / WORKFLOW Folder Semantics Cleanup
 
+> **⚠️ 大部分已被 Amendment 9 supersede**：Amendment 8 的核心结论「DSS/WORKFLOW get-task /
+> selected 不接受 folder、folder 不属于任何 detail identity、Export Errors DSS/WF folder 为空、
+> WORKFLOW 8 列」均被 Amendment 9 逆转——三类型重新要求 folder（用于 FRS discovery 取 frs_id），
+> WORKFLOW 恢复 9 列（新增 FRS ID，非旧 folder 列）。以 Amendment 9 为准。以下保留历史记录。
+
 **性质**：CLI / 输入契约清理 + schema 修正。**不新增 API、不改 detail route、不重写 exporter、
 不涉及写操作。**
 
@@ -1315,4 +1320,90 @@ type-dependent dedup（6→4、MTT 跨 folder 同名保留）、`detect_input_am
 不传 folder_path、warning 新措辞、DSS/WF 失败对象无 folder、WORKFLOW/ALL Excel round-trip 8 列与
 sheet 顺序、`_cmd_export` Export Errors folder 按类型（DSS=""/MTT=folder）、MTT selected 失败保留 folder。
 
-*相关提交：本次（`fix: clarify DSS and workflow folder semantics`）。*
+*相关提交：`fix: clarify DSS and workflow folder semantics`。*
+
+## Amendment 9 — Unified FRS ID Exposure for DSS / MTT / WORKFLOW
+
+**性质**：查询结果与 Excel 业务导出统一双 ID 契约 + 三类型 folder 语义统一。**不新增 API、
+不改 detail route、不改 ID 值、不改业务行为、不涉及写操作。**
+
+**核心原则**：**FRS discovery identity ≠ V2 detail identity。**
+- **MTT**：folder → FRS object ID → `mttask/frs/{frs_id}`，folder 同时是 detail identity（消歧）。
+- **DSS / WORKFLOW**：folder → FRS discovery only（可靠取得对应 FRS object 的 `frs_id`）；detail
+  仍走 V2 by-name（`dsstask/name/{name}` / `workflow/name/{name}`），**by-name detail 无法按
+  folder 消歧**（组织内其它 folder 存在同名 task 时）。这是 by-name endpoint 限制，**不是 FRS 与
+  classic ID 体系映射不确定**。
+
+### 双 ID 正式契约
+
+三种类型 normalized detail 与 Excel 统一：`id` = classic V2 ID、`frs_id` = FRS object ID。
+不得用单个 `id` 同时表示两种 ID。MTT 原有 `id + frs_id` 模型推广到 DSS / WORKFLOW。
+
+### 变更点
+
+1. **`list_tasks()` 输出 `id` → `frs_id`**：V3 `/objects` 返回的 id 即 FRS object ID，统一命名
+   `frs_id`（无 active compatibility alias）。所有调用方（`_cmd_export`、selected discovery、
+   `_discover_frs_id`）改用 `frs_id`；AmbiguousTaskError candidates 用 `frs_id` key。
+2. **共享 `_discover_frs_id(client, folder_path, task_type, task_name)`**：三类型复用同一
+   folder discovery + exact-name 匹配 + 0/1/>1 判定（0→TaskNotFoundError、>1→AmbiguousTaskError
+   candidates 用 frs_id、1→frs_id）。MTT/DSS/WORKFLOW 的 `get_task_detail` 均经此 helper。
+3. **三类型 get-task 均需 `--folder`**：缺失 → `MissingFolderError`（0 HTTP、exit 1）。逆转
+   Amendment 8 的「DSS/WORKFLOW 非空 folder → UnsupportedArgumentError」。
+4. **DSS / WORKFLOW normalized detail 含 `id`（by-name response 的 classic id）+ `frs_id`
+   （folder-scoped discovery）**。
+5. **内部 FRS 直传（编排层专用）**：`get_task_detail(task_id=<frs_id>, task_id_type="frs")` 对三
+   类型一致 —— MTT 走 `mttask/frs/{frs_id}`；DSS/WORKFLOW 走 by-name（需 task_name），`frs_id`
+   回填、不二次 discovery。`task_id` 与 `folder_path` 冲突 → `ConflictingArgumentsError`；
+   `task_id_type` 非 `"frs"` → `InvalidIdTypeError`（不发 HTTP）。CLI / selected 输入**不暴露**
+   `task_id` / `task_id_type`。
+6. **普通 export 复用初始 `list_tasks()` 的 frs_id**：每 task 以 `task_id=frs_id,
+   task_id_type="frs"` 直传 detail，DSS/WORKFLOW **不再二次 discovery**。
+7. **export-selected 输入 schema 三类型统一 `{name, type, folder}`**：folder 对三类型均必需、
+   trim 后非空，否则 `SelectedTaskInputError`（0 API、0 workbook、exit 1）。逆转 Amendment 8 的
+   type-conditional schema。
+8. **selected dedup 键三类型统一 `(type, folder, name)`**：跨 folder 同名（含 DSS/WORKFLOW）
+   分属不同 FRS object，不去重、**不重新引入 `ambiguous_input` 阻断**。每 unique (folder, type)
+   只 discovery 一次。
+9. **Excel 三业务 schema 各加 `FRS ID`（紧邻 `id`）**：MTT 22→**23**、DSS 11→**12**、
+   WORKFLOW 8→**9**（WORKFLOW 在 `id` 后插入 FRS ID，不重排 orgId/id）。`id` 仍表示 classic V2 ID
+   （本轮不重命名为 Classic ID，避免扩大 breaking change）。ALL 顺序不变：
+   `MTT Task`(23) → `DSS Tasks`(12) → `Workflow Tasks`(9) → `Export Errors`。
+10. **organization-level warning 更新措辞**：DSS/WORKFLOW → "resolved by name only. The
+    supplied folder is used to resolve the FRS ID, but it does not disambiguate the V2 detail
+    response when duplicate names exist elsewhere in the organization."
+11. **Export Errors.folder 三类型统一记录 requested / FRS-discovery folder**（逆转 Amendment 8 的
+    「DSS/WF 必须为空」）。DSS/WORKFLOW 的该值不代表 V2 detail 已按 folder 验证。
+
+### 对 Amendment 8 的 supersede（明确对照）
+
+| 旧 Amendment 8 | Amendment 9 |
+|---|---|
+| DSS/WF get-task 不接受 folder | DSS/WF get-task 重新要求 folder（FRS discovery） |
+| DSS/WF selected 不接受 folder | DSS/WF selected 重新要求 folder |
+| DSS/WF folder 不属于任何 detail identity | folder 是 FRS discovery identity；仍非 V2 by-name detail identity |
+| Export Errors DSS/WF folder 为空 | 三类型统一记录 FRS-discovery folder |
+| WORKFLOW 8 列（去 folder） | WORKFLOW 9 列（id 后加 FRS ID） |
+
+### 不做 / 未改（回归保证）
+
+不新增 `POST /public/core/v3/lookup`、不实现 `POST /public/core/v3/export`；detail route 全不变
+（`mttask/frs/{frs_id}` / `dsstask/name/{name}` / `workflow/name/{name}`）；不新增 `dsstask/{frs_id}`
+/ `workflow/{frs_id}`；不依赖裸 `mttask/{id}`；V3 返回的 ID 值本身不变；MTT transformation 展开 /
+DSS 单行 / WORKFLOW child 展开与 count 语义、缓存、enrichment 分级——全部不变。
+
+### 已验证
+
+fake 测试 A–Q（31 断言，全 fake、无真实 IICS）：list_tasks frs_id（无旧 id）、三类型 get-task
+folder discovery + id=classic/frs_id=FRS + 正确 route、三类型缺 folder → MissingFolderError(0 HTTP)、
+DSS/WF 非空 folder 不再 UnsupportedArgumentError、frs 直传旁路(0 discovery)、Conflicting/InvalidId、
+ordinary export 复用(单次 discovery)、selected 三类型 folder required、dedup (type,folder,name)、
+跨 folder 同名两条保留无 ambiguous_input、warning 新措辞、Excel 23/12/9 且 FRS ID 紧邻 id、
+id=classic/FRS ID=discovered、ALL 顺序、WORKFLOW child 2→2/0→1 每行重复 id+FRS ID、无 lookup/export、
+无 dsstask/{frs}·workflow/{frs}。
+
+### 列数订正（顺手）
+
+Amendment 8 后文档基线曾滞后（WORKFLOW 8）。Amendment 9 完成后正式值：**MTT 23 / DSS 12 /
+WORKFLOW 9**。
+
+*相关提交：本次（`feat: expose FRS IDs across task queries and exports`）。*

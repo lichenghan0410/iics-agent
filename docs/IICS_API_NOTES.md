@@ -261,23 +261,34 @@ tasks = [
 - child `taskId` 按 V2 response 原样保留，**不做 ID 类型推断**（不得当作 V3 FRS ID）。
 - WORKFLOW export **不查询** child 的 MTT/DSS 详情（不新增请求）。
 
-### 7.6 Selected Task Export 复用的现有边界（Amendment 6，无新增 API research）
+### 7.6 Selected / get-task / export 复用的现有边界（Amendment 6 / 9，无新增 API research）
 
-`export-selected` 只是编排层，复用已实测的路径，**未引入新 API 结论**：
+编排层复用已实测的路径，**未引入新 API 结论**（三类型均先 V3 folder discovery 取 frs_id）：
 
-- DSS 详情：`dsstask/name/{name}`（by-name）。
-- MTT 详情：V3 folder 枚举取 FRS object ID → `mttask/frs/{frs_id}`。
-- WORKFLOW 详情：`workflow/name/{name}`（by-name）。
+- V3 discovery：`GET /saas/public/core/v3/objects`（`list_tasks`），三类型共用。
+- DSS 详情：`dsstask/name/{name}`（by-name）；`frs_id` 来自 discovery。
+- MTT 详情：`mttask/frs/{frs_id}`；folder 同时是 detail identity。
+- WORKFLOW 详情：`workflow/name/{name}`（by-name）；`frs_id` 来自 discovery。
 
-**本 feature 未解决 DSS / WORKFLOW 的 organization 级同名 ambiguity**：by-name 端点无 folder 约束，
-组织内其它 folder 若存在同名 DSS/WORKFLOW，仍无法保证取到 selected folder 的那个（summary
-warning 提示，属固有风险，未扫描全组织）。MTT 经 folder discovery + FRS object ID 无此问题。
+**DSS / WORKFLOW 的 organization 级同名**：folder discovery 可可靠取得对应 FRS object 的
+`frs_id`，但 by-name detail 端点无 folder 约束——组织内其它 folder 若存在同名，by-name 返回的
+classic detail 无法保证是同一 folder 的对象（summary warning 提示，属 by-name 固有限制）。MTT 经
+`mttask/frs/{frs_id}` 无此问题。
 
-> **Amendment 8 明确 folder 语义**：DSS / WORKFLOW 的 detail 层**无可靠 folder identity**，
-> folder 仅是 `list-tasks` / `export` 的**枚举范围**，不是详情身份。因此 `get-task DSS|WORKFLOW`
-> 与 selected 输入**不接受 folder**（非空即 `UnsupportedArgumentError` / `SelectedTaskInputError`，
-> 发 HTTP 之前失败），normalized detail 不含合成 `folder` 键。dedup 键 DSS/WORKFLOW=`(type,name)`、
-> MTT=`(type,folder,name)`。只有 **MTT** 的 folder 是真实身份数据（V3 discovery → FRS object ID）。
+> **Amendment 8（已被 Amendment 9 supersede）** 曾规定 DSS/WORKFLOW 不接受 folder。
+>
+> **Amendment 9 明确 folder 语义（FRS discovery identity ≠ V2 detail identity）**：三类型 get-task
+> 与 selected 输入**均要求 folder**。folder 经 **同一份 V3 `/objects` discovery**（`list_tasks`）
+> 取得目标对象的 **FRS object ID**（`frs_id`）——这对 DSS/WORKFLOW 也是可靠的（folder 内 exact-name
+> 命中唯一 FRS object）。但 DSS/WORKFLOW 的 **detail 仍走 V2 by-name**，`dsstask/name/{name}` /
+> `workflow/name/{name}` **不带 folder 约束**：组织内其它 folder 存在同名时，by-name detail 无法
+> 保证与 discovery 得到的 FRS object 是同一个。故：
+> - `frs_id`（FRS folder identity）**可用**；`id`（by-name detail 的 classic V2 ID）的 folder
+>   归属**不可保证**。这是 by-name endpoint 限制，**不是 FRS 与 classic ID 映射关系存疑**。
+> - 三类型 normalized detail / Excel 统一暴露 `id`（classic）+ `frs_id`（FRS object ID）。
+> - dedup 键三类型统一 `(type, folder, name)`；跨 folder 同名分属不同 FRS object，不去重、不阻断。
+> - 编排层可用 `task_id=<frs_id> + task_id_type="frs"` 跳过二次 discovery（三类型一致；CLI/selected
+>   不暴露）。**未新增** `POST /public/core/v3/lookup` 或 `/export`（现有 GET `/objects` 已够）。
 
 ---
 
@@ -299,6 +310,7 @@ warning 提示，属固有风险，未扫描全组织）。MTT 经 folder discov
 - MTT / WORKFLOW 详情的 runtime 与 connection 字段结构（v0.1 仅深度验证 DSS）。
 - V3 `q` 是否支持 `tag` / `updateTime` 过滤（KB 提及，未验证）。
 - 跨文件夹同名 task：**MTT 已解决**（V3 FRS object ID → `mttask/frs/{id}`，见 §7.0）；
-  **DSS / WORKFLOW 仍未解决**（FRS → V2 by-id 返回 500，继续 by-name）。Amendment 8 起
-  明确 DSS/WORKFLOW folder 非详情身份、不接受 folder 输入（见 §7.6 注）。
+  **DSS / WORKFLOW 的 FRS discovery 层已可按 folder 取得唯一 frs_id（Amendment 9），但 detail 层
+  仍走 V2 by-name 无 folder 约束**（`dsstask/{frs_id}` / `workflow/{frs_id}` 返回 500，不可用）——
+  detail 的 folder 消歧仍未解决（见 §7.6 Amendment 9 注）。
 - 写操作（update/batch）的 PARTIAL UPDATE 行为——v0.1 严格只读，未触碰。

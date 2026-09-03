@@ -9,8 +9,8 @@ Session token:
 
 子命令:
   python iics_cli.py list-tasks <folder> [--type DSS|MTT|WORKFLOW|ALL] [--page-size N]
-  python iics_cli.py get-task <task_name> <task_type> [--folder PATH] [--no-resolve]
-                       # --folder 仅 MTT；DSS/WORKFLOW 按 name 解析、不接受 --folder
+  python iics_cli.py get-task <task_name> <task_type> --folder PATH [--no-resolve]
+                       # Amendment 9：三类型均需 --folder（FRS discovery 取 frs_id）
   python iics_cli.py resolve-connection <id> [<id>...]
   python iics_cli.py export <folder> [--type ALL] [--details|--summary-only]
                        [--format excel|json] [--filename NAME]
@@ -76,8 +76,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p_get.add_argument("type", choices=["DSS", "MTT", "WORKFLOW"])
     p_get.add_argument(
         "--folder", default="",
-        help="MTT 必需（用于 V3 定位 FRS object ID）；DSS / WORKFLOW 不支持——"
-             "其详情按 name 解析，传入非空 --folder 将报 UnsupportedArgumentError",
+        help="三类型均必需（Amendment 9：用于 V3 folder discovery 取 FRS object ID）。"
+             "MTT 的 folder 同时参与 detail 消歧；DSS / WORKFLOW 的 folder 仅用于 FRS "
+             "discovery，其 detail 仍按 name 解析、无法按 folder 消歧。缺失 → MissingFolderError",
     )
     p_get.add_argument(
         "--full", action="store_true",
@@ -166,40 +167,40 @@ def _cmd_export(client, args) -> dict:
         for task in tasks:
             name = task.get("name", "")
             ttype = task.get("type", "")
-            tid = task.get("id", "")
+            # Amendment 9：list_tasks 已返回 frs_id；三类型均复用它直传 detail，
+            # 不再为 DSS/WORKFLOW 二次 discovery。
+            frs_id = task.get("frs_id", "")
             _log(f"  fetching detail: {name} ({ttype})")
             if ttype == "MTT":
-                # MTT：复用 list_tasks 已返回的 FRS object ID 走 FRS，
-                # 不传 name/folder（避免 ConflictingArgumentsError），后续回填
                 detail = get_task_detail(
                     client,
                     task_type="MTT",
-                    task_id=tid,
+                    task_id=frs_id,
                     task_id_type="frs",
                 )
                 if isinstance(detail, dict) and "error" not in detail:
-                    # MTT 归一化 detail 用 task_name/task_location；method B 返回时为空，回填
+                    # MTT 归一化 detail 用 task_name/task_location；直传时为空，回填
                     if not detail.get("task_name"):
                         detail["task_name"] = name
                     if not detail.get("task_location"):
                         detail["task_location"] = args.folder
             else:
-                # DSS / WORKFLOW：by-name（Amendment 8：folder 仅是枚举范围，
-                # detail 层无 folder identity，不传 folder_path）
+                # DSS / WORKFLOW：by-name detail + 直传 frs_id 回填（跳过二次 discovery）
                 detail = get_task_detail(
                     client,
                     task_name=name,
                     task_type=ttype,
+                    task_id=frs_id,
+                    task_id_type="frs",
                 )
             if isinstance(detail, dict) and "error" in detail:
                 # 单个 task 详情失败：记录，不中断整批 export
-                # Export Errors.folder 按类型：MTT=枚举/identity folder；DSS/WF="".
-                err_folder = args.folder if ttype == "MTT" else ""
+                # Amendment 9：三类型 folder 均为合法 FRS-discovery 输入，统一记录 args.folder
                 failed_details.append(
                     {
                         "name": name,
                         "type": ttype,
-                        "folder": err_folder,
+                        "folder": args.folder,
                         "error_type": detail.get("error_type", ""),
                         "error": detail.get("error", ""),
                     }
@@ -209,7 +210,8 @@ def _cmd_export(client, args) -> dict:
                     {
                         "name": name,
                         "type": ttype,
-                        "folder": err_folder,
+                        "folder": args.folder,
+                        "frs_id": frs_id,
                         "status": task.get("status", ""),
                     }
                 )

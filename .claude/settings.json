@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(python iics_cli.py *)",
+      "Bash(python smoke_test.py)",
+      "Read"
+    ],
+    "deny": [
+      "Edit",
+      "Write",
+      "Bash(curl *)"
+    ]
+  }
+}

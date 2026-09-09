@@ -6,3 +6,8 @@ venv/
 *.xlsx
 *.jsonl
 .DS_Store
+
+# Takeda delivery branch: exclude personal dev-only content
+docs/
+smoke_test.py
+.claude/settings.local.json

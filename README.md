@@ -2,162 +2,229 @@
 
 # IICS Agent 利用マニュアル
 
-Takeda Japan IICS 運用ツール：自然言語（Claude Code CLI）または手動コマンドで、3 つの `JAPAN_*` フォルダ配下の task 構成を照会し、Excel に出力します。
+Takeda Japan 向け IICS 運用ツールです。自然言語（Claude Code CLI）または手動コマンドで、folder 配下の IICS task 設定を検索・確認・エクスポートできます。
 
-**現在のバージョン：v0.1.1 Read-only MVP** —— 読み取り専用の照会のみ。書き込み操作は一切サポートしていません。
+**現在のバージョン：v0.1 Read-only MVP** — 参照専用で、書き込み操作はサポートしません。
 
-本マニュアルは **Windows + PowerShell** を主な前提環境として記載します（実際の利用環境）。Git Bash / WSL / macOS で操作する場合は、該当箇所で差分を注記します。
+本マニュアルは **Windows + PowerShell** を主な利用環境として説明します。
 
 ---
 
-## これは何か
+## 概要
 
-IICS（Informatica Intelligent Cloud Services）には数千の task が 3 つのプロジェクトフォルダに分散しており、Web UI で 1 件ずつ開いて構成を確認するのは非効率です。本ツールは「task の列挙 / 詳細の確認 / connection ID の解決 / Excel 出力」の 4 つをコマンド化したもので、自然言語での操作（Mode A）と手動実行（Mode C）の両方に対応します。今後は task の改修（変更）にも対応予定です。
+IICS（Informatica Intelligent Cloud Services）には多数の task があり、Web UI で一件ずつ開いて設定を確認するのは非効率です。本ツールは以下の read-only 操作を共通 CLI にまとめています。
 
-適用範囲：
+- task の列挙
+- task 詳細の確認
+- connection ID の名前解決
+- folder 全体のエクスポート
+- ユーザーが指定した task list のエクスポート
+
+操作方法は 2 種類あり、どちらも同じ Python 実装を呼び出すため、結果は同一です。
+
+- **Mode A — Claude Code**：自然言語で要件を伝えると、Claude Code が自動的に適切な `iics_cli.py` を選択・実行します
+- **Mode C — Manual CLI**：利用者が `iics_cli.py` を直接実行します
+
+### 対象範囲
 
 | 項目 | 値 |
-|----|------|
-| IICS Org | `use4.dm-us.informaticacloud.com`（Takeda Prod） |
-| フォルダ | `JAPAN_COMMERCIAL_DWH`、`JAPAN_SCRM_BAU`、`JAPAN_SCRM_DI` |
-| Task 種別 | `DSS`（Sync Task）、`MTT`（Mapping Task）、`WORKFLOW`（Linear Taskflow） |
+|---|---|
+| IICS platform host | `use4.dm-us.informaticacloud.com`（Informatica IICS 米国 pod の共通 API endpoint。Takeda の dev/test/prod 各 org は同一 host を利用し、実際にどの org にアクセスするかは現在使用中の `IICS_SESSION_TOKEN` によって決まり、host 自体には依存しません） |
+| 検証済み folder | `JAPAN_COMMERCIAL_DWH`、`JAPAN_SCRM_BAU`、`JAPAN_SCRM_DI` など |
+| Task type | `DSS`（Sync Task）、`MTT`（Mapping Task）、`WORKFLOW`（Linear Taskflow） |
+
+ツール自体は folder を限定していません。現在の IICS ユーザーアカウントがアクセス権を持つ folder であれば検索・エクスポートできます。上記 3 folder は現時点で実際に検証済みのものです。それ以外の folder も理論上利用可能で、実際の利用可否は現在のアカウント権限に依存します。
 
 ## できること / できないこと
 
 | できること | できないこと |
-|----|------|
-| フォルダ配下の task 一覧を照会 | task の runtime / connection の変更（v0.1 には書き込み経路がなく、遮断ではなくコードに存在しない） |
-| task の完全な構成詳細を確認 | 一括変更 |
-| connection ID を可読名に解決 | token の自動更新（失効時は手動で再取得が必要） |
-| Excel 出力（Task Summary sheet、source/target オブジェクト列を含む） | フォルダをまたいだ同名 task の確実な区別（IICS API の制約、後述） |
+|---|---|
+| folder 配下の task 一覧を取得 | task runtime / connection の変更 |
+| task 設定詳細の確認 | IICS 設定の一括変更 |
+| connection ID を読みやすい名前に解決 | browser SSO token の自動更新 |
+| folder 全体を Excel / JSON にエクスポート | CLI から POST / PUT / PATCH / DELETE を実行 |
+| 指定した task list のみをエクスポート | DSS / WORKFLOW の V2 by-name detail を folder 単位で強制的に disambiguate |
+
+v0.1 の書き込み操作は「コードはあるが権限で止める」という構造ではありません。Python 実装自体が GET request のみを許可し、それ以外の method を試すと直接エラーになります。
 
 ---
 
-## 初回利用：ゼロからのセットアップ
+## プロジェクト構成と Claude Code 設定
 
-### 1. 端末環境の確認
+```text
+IICS-Agent/
+├── CLAUDE.md
+├── iics_cli.py
+├── iics_client.py
+├── tools/
+├── cache/
+└── .claude/
+    ├── settings.json
+    ├── settings.local.json
+    └── skills/
+        └── iics-agent/
+            └── SKILL.md
+```
 
-PowerShell を開き（スタートメニューで "PowerShell" を検索）、順に実行します：
+各部分の役割：
+
+| ファイル / レイヤー | 役割 |
+|---|---|
+| Python（`iics_cli.py` / `iics_client.py` / `tools/`） | IICS API 呼び出し、データ解析、エクスポート、GET-only enforcement |
+| `.claude/settings.json` | プロジェクト共有の Claude Code runtime permission。Git 管理対象で、チーム共通 |
+| `.claude/settings.local.json` | 現在のユーザー端末固有の permission override。Git 管理対象外 |
+| `CLAUDE.md` | Agent の project-level behavior rule：認証方式、安全境界、working directory rule |
+| `.claude/skills/iics-agent/SKILL.md` | IICS 操作の具体的な procedure：command selection、parameter、result interpretation |
+
+### Claude Code permission 設定
+
+現在の `.claude/settings.json`：
+
+```json
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(python iics_cli.py *)",
+      "Bash(python smoke_test.py)",
+      "Read"
+    ],
+    "deny": [
+      "Edit",
+      "Write",
+      "Bash(curl *)"
+    ]
+  }
+}
+```
+
+意味：
+
+- `allow`：`iics_cli.py`、`smoke_test.py` の実行および project file の読み取りを毎回手動確認せず許可
+- `deny`：Claude Code による file modification（`Edit` / `Write`）を禁止し、`curl` で official CLI を bypass して IICS へ直接アクセスすることも禁止
+
+> **重要**：この設定が制御するのは **Claude Code がどの tool を呼び出せるか** であり、IICS 自体の write protection ではありません。v0.1 の本当の read-only guarantee は Python 実装にあります。`IICSClient._request()` は `GET` method のみを受け付け、それ以外の method は直接 exception になります。permission 設定が誤って変更されても、Python は実際の write request を送信しません。
+>
+> 今後さらに Claude Code から見える tool を制限したい場合（例：network access 系 tool を無効化）、`deny` に tool name を追加できます。
+
+`.claude/settings.local.json` は個人端末での追加 permission 用です（例：特定 command の “do not ask again” 記録）。他の team member には影響せず、Git に commit しません。
+
+---
+
+## 初回利用：ゼロからセットアップ
+
+### 1. ローカル環境を確認
+
+PowerShell を開いて実行：
 
 ```powershell
 py --version
 py -m pip --version
 ```
 
-いずれもバージョン番号（例：`Python 3.11.x`）が表示されれば、手順 2 へ進みます。
+正常に version が表示される場合（例：`Python 3.11.x`）、次へ進みます。
 
-`py は内部コマンドまたは外部コマンド...ではありません` と表示される場合、Python が未インストールです。[python.org/downloads](https://www.python.org/downloads/) から 3.11 または 3.12 をダウンロードし、インストール時に **必ず "Add python.exe to PATH" にチェック**を入れてください。完了後、PowerShell を開き直して上記 2 コマンドを再実行します。
+`py 不是内部或外部命令` のように表示される場合は Python が未導入です。[python.org/downloads](https://www.python.org/downloads/) から 3.11 または 3.12 をインストールし、インストール時に **"Add python.exe to PATH"** を必ず有効にしてください。インストール後、PowerShell を開き直して再実行します。
 
-### 2. 依存パッケージのインストール
+### 2. Project dependency をインストール
 
 ```powershell
-Set-Location -LiteralPath "実際のプロジェクトパスに変更してください"
+Set-Location -LiteralPath "実際のプロジェクトパスに変更"
 py -m pip install -r requirements.txt
 ```
 
-裸の `pip` ではなく `py -m pip` を使うことで、企業端末で複数の Python バージョンがある場合の誤インストールを回避できます。
+#### 任意：virtual environment を利用
 
-`requirements.txt` は 2 パッケージのみで、Anthropic SDK は不要です：
-
+```powershell
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
 ```
-requests>=2.31.0
-openpyxl>=3.1.0
+
+PowerShell execution policy のため virtual environment を activate できない場合、activate せず直接 virtual environment の Python を使えます。
+
+```powershell
+.\.venv\Scripts\python.exe .\iics_cli.py list-tasks JAPAN_SCRM_DI --type DSS
 ```
 
-> **任意：仮想環境で依存を分離**
->
-> システム Python に入れたくない場合は仮想環境を利用できます（必須ではなく、スキップしても動作します）：
->
-> ```powershell
-> py -m venv .venv
-> .\.venv\Scripts\Activate.ps1
-> python -m pip install -r requirements.txt
-> ```
->
-> アクティベート時に `running scripts is disabled on this system` と出る場合は、先に一度実行します：
->
-> ```powershell
-> Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
-> ```
->
-> またはアクティベートせず、仮想環境内の Python を直接呼び出します：
->
-> ```powershell
-> .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-> .\.venv\Scripts\python.exe .\iics_cli.py list-tasks JAPAN_SCRM_DI --type DSS
-> ```
+### 3. “Token 未設定” の事前確認
 
-### 3. 「token なし事前チェック」を一度実行
-
-token を設定せずにコマンドを 1 本実行し、Python 環境とスクリプト自体に問題がないことを確認します：
+token をまだ設定せず、まず program 自体が起動できることを確認します。
 
 ```powershell
 python .\iics_cli.py list-tasks JAPAN_SCRM_DI --type DSS
 ```
 
-期待される出力：
+想定される出力：
 
 ```json
 {
-  "error": "IICS_SESSION_TOKEN 未設定",
+  "error": "IICS_SESSION_TOKEN 未设置",
   "error_type": "ValueError"
 }
 ```
 
-この結果が出れば、Python・依存・スクリプトのエントリはすべて正常で、あとは token の設定を残すのみです。別のエラー（例：`ModuleNotFoundError`）が出る場合は、手順 2 に戻って依存インストールを確認してください。
+この結果が出れば、Python、dependency、CLI entrypoint は正常で、token だけが未設定です。
 
-### 4. Session Token の取得
+### 4. Session Token を取得
 
-IICS は現在、企業 SSO（Okta）を使用しており、専用サービスアカウントがないため、token はブラウザから手動で取得します：
+現在は企業 SSO（Okta）を利用しており、独立 service account はありません。token は browser から手動取得します。
 
-1. ブラウザ（Chrome / Edge）で IICS Web UI に SSO ログインし、Okta 認証を完了する。
-2. `F12` で開発者ツールを開き、上部の **Network** タブをクリックする。
-3. 現在の IICS ページを再読み込みし、リクエストを再送させる。
-4. リクエスト一覧で `objects`、`connection`、`api` のような名前のリクエストを 1 つ開く。
-5. 右側パネルで **Headers** → **Request Headers** までスクロールし、`Cookie` の行を見つける。
-6. 長い Cookie 文字列の中から `USER_SESSION=` を探し、**等号の後ろから次のセミコロン `;` の前まで**の値だけをコピーする。
+1. Chrome / Edge で IICS Web UI にログインし、SSO 認証を完了
+2. `F12` で developer tools を開き、**Network** tab へ移動
+3. IICS page を refresh
+4. 正常な IICS API request を 1 つ開く
+5. **Request Headers → Cookie** から `USER_SESSION=<長い値>` を探す
+6. `USER_SESSION=` の直後から、次の `;` の直前までをコピー
 
-### 5. Token の設定
+### 5. Token を設定
 
 ```powershell
-$env:IICS_SESSION_TOKEN = "<コピーした USER_SESSION の値>"
+$env:IICS_SESSION_TOKEN = "<コピーした USER_SESSION value>"
 ```
 
-この設定は現在の PowerShell ウィンドウ内でのみ有効です。**ファイルに書かない・スクリーンショットで共有しない**でください。ウィンドウを閉じると次回は再設定が必要です。
+この value は**現在の terminal window**の環境変数にのみ置いてください。
 
-### 6. 最初の本番コマンドを実行
+**禁止事項：**
+
+- `.env` やその他 config file へ保存
+- print / echo
+- Git へ commit
+- Claude Code conversation、メール、chat tool、ticket へ貼り付ける（troubleshooting 目的でも不可。必要なら mask した screenshot か文字説明を使用）
+
+Token が期限切れになった場合（command が 401 または session expired を返す）、browser から再取得し、上記 command を再実行します。terminal window を閉じた場合も token は再設定が必要です。
+
+### 6. 最初の実コマンドを実行
 
 ```powershell
 python .\iics_cli.py list-tasks JAPAN_SCRM_DI --type DSS
 echo $LASTEXITCODE
 ```
 
-成否の判定：
-
 | `$LASTEXITCODE` | 意味 |
 |---|---|
-| `0` | 成功。上に表示された JSON の `tasks` 一覧を確認 |
-| `1` | 失敗。JSON の `error` フィールドを確認し、後述の「トラブルシューティング」を参照 |
+| `0` | command 正常完了。stdout の JSON result を確認 |
+| `1` | top-level fatal error。JSON の `error` field を確認 |
 
-ここで task 一覧が表示されれば環境構築は完了で、日常利用に進めます。
+正常な JSON output が表示されれば（`count` が 0 でも可）、環境は利用可能です。
 
 ---
 
-## 日常利用：2 つのモードの選び方
+## 日常利用：Mode A / Mode C
 
-| | Mode C：手動実行 | Mode A：Claude Code CLI |
+| | Mode C：Manual CLI | Mode A：Claude Code |
 |---|---|---|
-| 使い方 | PowerShell で直接 `python iics_cli.py ...` を入力 | `claude` セッション内で自然言語で指示 |
-| コマンド生成 | 自分で入力 | Claude Code CLI が自動生成 |
-| Claude Code の要否 | 不要 | 必要 |
-| 向いている場面 | すでに検証済みの方法をそのまま継続。スクリプト化・cron 定期実行・`claude` が使えない時 | 日常照会、コマンド書式を覚えたくない、自然言語で要求を伝えたい時 |
+| 使い方 | `python iics_cli.py ...` を直接実行 | `claude` session で自然言語入力 |
+| command selection | 利用者 | Claude Code が intent に応じて自動選択 |
+| Claude Code のインストール | 不要 | 必要 |
+| 向いている用途 | command に慣れている、script batch、troubleshooting | 日常検索、command format を覚えたくない、selected task list の整理 |
 
-両モードとも呼び出す**エントリは完全に同一**の `iics_cli.py` で、コード差分はなく、出力も同じく JSON です。「初回利用」で実行したのが Mode C です。自然言語で操作したい場合は Claude Code を導入して Mode A に切り替えられ、両者はいつでも切替可能で競合しません。
+2 つの mode はいつでも切り替え可能で、競合しません。
 
-### Mode C：手動実行（上記の方法をそのまま継続）
+### Mode C：手動実行
 
 ```powershell
-$env:IICS_SESSION_TOKEN = "<USER_SESSION の値>"
+$env:IICS_SESSION_TOKEN = "<USER_SESSION 値>"
 
 python iics_cli.py list-tasks JAPAN_SCRM_DI --type DSS
 python iics_cli.py get-task DI_FACT_SALES_DAILY DSS --folder JAPAN_SCRM_DI
@@ -165,61 +232,50 @@ python iics_cli.py resolve-connection 000LVU0B000000000015
 python iics_cli.py export JAPAN_COMMERCIAL_DWH --type ALL
 ```
 
-AI 層の介在がなく、セキュリティ境界は単純です。権限設定は不要で、token の取り扱いルールは Mode A と全く同じです。
+Mode C は Claude Code を経由しないため、`.claude/settings.json` の permission 設定には影響されず、Claude Code のインストールも不要です。
 
-### Mode A：Claude Code CLI
+### Mode A：Claude Code
 
-起動方法（PowerShell では継続行にバッククォート `` ` `` を使用。バックスラッシュではありません）：
+project root に移動して起動：
 
 ```powershell
-claude `
-  --tools "Bash,Read" `
-  --allowedTools "Bash(python iics_cli.py *)" "Bash(python smoke_test.py)" "Read" `
-  --disallowedTools "Edit" "Write" "Bash(curl *)"
+Set-Location -LiteralPath "実際のプロジェクトパスに変更"
+claude
 ```
 
-> Git Bash / WSL / macOS のターミナルで起動する場合、継続行はバックスラッシュ `\` に変えます：
-> ```bash
-> claude \
->   --tools "Bash,Read" \
->   --allowedTools "Bash(python iics_cli.py *)" "Bash(python smoke_test.py)" "Read" \
->   --disallowedTools "Edit" "Write" "Bash(curl *)"
-> ```
+project の共有 permission（`.claude/settings.json`）と operation rule（`.claude/skills/iics-agent/SKILL.md`）は project と一緒に自動 load されるため、追加設定は不要です。
 
-3 つの flag の役割：
+新しい PC でこの project を初めて開くと、Claude Code が workspace trust の確認を求める場合があります。会社の security rule と実際の project situation に基づいて確認してください。project-level `allow` rule は trust 後に auto-approval rule として有効になります。`deny` rule はこれに影響されず、常に即時有効です。
 
-- `--tools "Bash,Read"`：Claude Code から見えるツール集合を制限。`Edit`/`Write` などは含まれません。
-- `--allowedTools`：`iics_cli.py`、`smoke_test.py` の 2 コマンドを確認なしで自動実行させる自動承認ルール（可視性の制限ではありません）。
-- `--disallowedTools`：Bash 内の危険な呼び出しパターン（例：`curl`）を拒否。Bash 全体が見えていても遮断されます。
+session 内では自然言語で直接依頼できます。
 
-`--dangerously-skip-permissions` は**使用しないでください**。
+| 入力例 | 対応操作 |
+|---|---|
+| "JAPAN_SCRM_DI 配下の DSS task を一覧にして" | task を列挙 |
+| "DI_FACT_SALES_DAILY の DSS 詳細を見たい。folder は JAPAN_SCRM_DI" | 単一 task 詳細 |
+| "この connection ID を名前に解決して" | connection を resolve |
+| "JAPAN_COMMERCIAL_DWH の全 task を export して" | folder 全体 export |
+| "この task だけ export して"（Excel / table をそのまま貼り付け可） | selected list export |
 
-セッション開始後は自然言語で要求を伝えるだけで、Claude Code CLI が対応するコマンドを自動生成します：
-
-| 指示例 | Claude Code CLI が実行するコマンド |
-|------|--------------------------|
-| 「JAPAN_SCRM_DI の DSS task を一覧して」 | `python iics_cli.py list-tasks JAPAN_SCRM_DI --type DSS` |
-| 「DI_FACT_SALES_DAILY という DSS の詳細を見せて」 | `python iics_cli.py get-task DI_FACT_SALES_DAILY DSS --folder JAPAN_SCRM_DI` |
-| 「この connection id を名前に解決して」 | `python iics_cli.py resolve-connection 000LVU...` |
-| 「JAPAN_COMMERCIAL_DWH の全 task を Excel に出力して」 | `python iics_cli.py export JAPAN_COMMERCIAL_DWH --type ALL` |
+**`--dangerously-skip-permissions` で起動しないでください。**
 
 ---
 
 ## 機能詳細（Mode A / Mode C 共通）
 
-以下の 4 つのサブコマンドが v0.1 の全機能です。両モードとも同じコマンド書式で直接これらを呼び出します。
+v0.1 では 5 個の read-only subcommand を公開しています。command syntax は両 mode で同じです。
 
-### 1. `list-tasks` — フォルダ配下の task を列挙
+### 1. `list-tasks` — folder 配下の task を列挙
 
 ```powershell
 python iics_cli.py list-tasks <folder> [--type DSS|MTT|WORKFLOW|ALL] [--page-size N]
 ```
 
-| 引数 | 必須 | 説明 |
-|------|------|------|
-| `<folder>` | 必須 | 3 つの `JAPAN_*` フォルダのいずれか |
-| `--type` | 任意 | 既定 `ALL`。`ALL` は DSS/MTT/WORKFLOW の 3 種を個別に照会し統合（`MAPPING` 等の非 task 設計オブジェクトは自動除外） |
-| `--page-size` | 任意 | 既定 200（IICS V3 の 1 ページ上限も 200。超過分は 200 に切り詰め） |
+| parameter | 必須 | 説明 |
+|---|---|---|
+| `<folder>` | はい | 現在の account がアクセス権を持つ IICS folder（`JAPAN_*` 3 folder は検証済み） |
+| `--type` | いいえ | default `ALL`、DSS + MTT + WORKFLOW の 3 種類（その他 IICS object type は含まない） |
+| `--page-size` | いいえ | 1 page の query 件数。通常は変更不要 |
 
 例：
 
@@ -227,302 +283,251 @@ python iics_cli.py list-tasks <folder> [--type DSS|MTT|WORKFLOW|ALL] [--page-siz
 python iics_cli.py list-tasks JAPAN_SCRM_DI --type DSS
 ```
 
-戻り値：
+返却された `count` と `tasks` は Python 側で集計済みなので、そのまま使用します。自分で再集計する必要はありません。
 
-```json
-{
-  "folder": "JAPAN_SCRM_DI",
-  "count": 847,
-  "tasks": [
-    {"name": "DI_FACT_SALES_DAILY", "type": "DSS", "frs_id": "...", "status": ""},
-    ...
-  ]
-}
-```
+---
 
-> `status` フィールドは現在常に空です。V3 のオブジェクト一覧自体が status 情報を持たないためで、API のデータ制約であり不具合ではありません。
-
-### 2. `get-task` — 単一 task の詳細確認
+### 2. `get-task` — 単一 task 詳細を確認
 
 ```powershell
-python iics_cli.py get-task <task_name> <task_type> [--folder PATH] [--no-resolve]
+python iics_cli.py get-task <task_name> <task_type> --folder <folder> [--full] [--no-resolve]
 ```
 
-| 引数 | 必須 | 説明 |
-|------|------|------|
-| `<task_name>` | 必須 | task 名 |
-| `<task_type>` | 必須 | `DSS` / `MTT` / `WORKFLOW` |
-| `--folder` | **三種別とも必須**（Amendment 9） | FRS discovery で `frs_id` を取得。MTT は folder が detail 消歧にも寄与。DSS / WORKFLOW の folder は FRS discovery 専用で、V2 by-name detail の folder 消歧はできない。欠落 → `MissingFolderError` |
-| `--no-resolve` | 任意 | connection ID → 名前の解決をスキップし、ID のみ表示 |
+| parameter | 必須 | 説明 |
+|---|---|---|
+| `<task_name>` | はい | task name |
+| `<task_type>` | はい | `DSS` / `MTT` / `WORKFLOW` |
+| `--folder` | **はい** | 3 type すべてで必須。対象 task object を正確に特定するために使用 |
+| `--full` | いいえ | 完全 detail を返す。diagnostic 用で、日常利用では不要 |
+| `--no-resolve` | いいえ | connection ID を name に解決せず、raw ID のみ表示 |
 
-例：
+#### DSS
 
 ```powershell
 python iics_cli.py get-task DI_FACT_SALES_DAILY DSS --folder JAPAN_SCRM_DI
 ```
 
-戻り値：
+default は簡潔な business field を返し、Excel export の column と一致します。
 
 ```json
 {
-  "name": "DI_FACT_SALES_DAILY",
-  "type": "DSS",
-  "id": "000LVU0I0000000004TZ",
-  "frs_id": "fABfm4RCYqVfuVEi9e8BGb",
-  "runtime_environment": {"id": null, "name": ""},
-  "source_connection": {"id": "000LVU0B000000000015", "name": "SCRM_ORA_STDB"},
-  "target_connection": {"id": "000LVU0B00000000009O", "name": "mysql_scrm_hnn_api"},
-  "raw": { ... }
+  "task_count": 1,
+  "rows": 1,
+  "records": [
+    {"Task Name": "..."}
+  ]
 }
 ```
 
-> **DSS `get-task` は既定で compact**（DSS Excel 12 列と一致）：`{task_count:1, rows:1, records:[{12 項目}]}` を返します。`--full` で上記の完全 detail を返します（上の JSON は `--full` の形）。`runtime_environment.name` は DSS では常に空（DSS 詳細 API が返さない、プラットフォーム制約でバグではない）。
->
-> **MTT 詳細は増強済み**：MTT は公式 FRS 経路を使い、DSS/WORKFLOW と異なる構造を返します——トップレベルに `id`（classic V2 ID）、`frs_id`（V3/FRS ID）、`detail_route`、`runtime_environment{id,name}`、`task_mapping{id,name,location,updated_on}`（`location` は現状空）、`transformations[]`（MTT parameters のみ由来）、`enrichment_warnings[]`。
->
-> **MTT 照会は task name と `--folder` の両方が必須**：指定した folder 内でまず該当 task の FRS ID を特定し、公式の FRS detail エンドポイントで詳細を取得します。これにより MTT のフォルダをまたいだ同名の曖昧さは解消されます。例：
->
-> ```powershell
-> python .\iics_cli.py get-task TASK_NAME MTT --folder JAPAN_SCRM_BAU
-> ```
->
-> MTT は `--id` の直接指定に対応しません。**Amendment 9：DSS / WORKFLOW も `--folder` が必須**になりました。folder は FRS discovery で `frs_id` を取得するために使われ、返り値には `id`（classic）と `frs_id`（FRS）の両方が入ります。ただし DSS / WORKFLOW の detail は依然 V2 by-name（`dsstask/name/{name}` / `workflow/name/{name}`）で解決されるため、**folder は FRS object の特定はできても、by-name detail が同一オブジェクトである保証まではできません**（組織内に同名 task があると by-name では folder 消歧不可）。これは ID 体系の対応関係の問題ではなく、by-name endpoint の制約です。
-
-**MTT `get-task` の既定出力（運用向け）** は Excel `Task Summary` と同じ業務フィールドのみ、transformation 1 件 = record 1 件：
+より完全な diagnostic 情報が必要な場合は `--full`：
 
 ```powershell
-python .\iics_cli.py get-task TASK_NAME MTT --folder JAPAN_SCRM_BAU
-# → {"task_count": 1, "rows": 2, "records": [ {業務フィールド…}, … ]}
+python iics_cli.py get-task DI_FACT_SALES_DAILY DSS --folder JAPAN_SCRM_DI --full
 ```
 
-完全な内部構造（`raw` / `frs_id` / `transformations` 等、診断・分析用）が必要な場合は `--full`：
+**注意**：organization 内の別 folder に同名 DSS task がある場合、`--folder` により内部的には指定 folder の object を正確に特定できますが、底層の detail query は name-based なので、指定 folder の設定を 100% 取得できるとは限りません。結果に関連 warning が出た場合は内容を確認してください。
+
+#### MTT
 
 ```powershell
-python .\iics_cli.py get-task TASK_NAME MTT --folder JAPAN_SCRM_BAU --full
+python iics_cli.py get-task TASK_NAME MTT --folder JAPAN_SCRM_BAU
 ```
 
-> **注意：戻り値の構造は task 種別で異なり、同一の解析ロジックは使えません**——**MTT** は `{task_count, rows, records[]}`、**DSS / WORKFLOW** は単一 task のフラットな辞書（`records` 包装なし）を返します。スクリプトからは先に `task_type` を判定してください。
+default も簡潔な business field を返します。**1 Source または Target transformation が 1 record** に対応し、1 task から複数 record が返る場合があります。
 
-### 3. `resolve-connection` — connection ID の解決
+完全 detail が必要な場合は `--full`。full detail の `transformations` field が authoritative result です。
+
+- 対象 MTT task 自身の raw parameter のみを source とし、所属 Mapping の parameter では補完しない
+- original order を保持し、deduplicate せず、first / last のみを切り出さない
+
+MTT detail query は具体的な object を正確に特定するため、**異なる folder にある同名 MTT を確実に区別できます**。DSS のような same-name ambiguity はありません。
+
+#### WORKFLOW
+
+```powershell
+python iics_cli.py get-task WORKFLOW_NAME WORKFLOW --folder JAPAN_SCRM_DI
+```
+
+完全 detail を返します（DSS / MTT のように default compact record ではありません）。folder の役割は DSS と同様で、内部的な object 特定には使えますが、organization 内の別 folder に同名 WORKFLOW がある場合、取得した detail が必ず指定 folder のものとは保証できません。
+
+---
+
+### 3. `resolve-connection` — connection ID を解決
 
 ```powershell
 python iics_cli.py resolve-connection <id> [<id>...]
 ```
 
-複数 ID を一度に渡せます（スペース区切り）：
+複数 ID を一度に指定可能：
 
 ```powershell
 python iics_cli.py resolve-connection 000LVU0B000000000015 000LVU0B00000000009O
 ```
 
-戻り値：
+結果は `resolved`（解決成功）と `failed`（解決失敗）に分かれます。同一 run 中に同じ connection ID が再登場した場合、既に取得した result を再利用し、重複 request は行いません。
 
-```json
-{
-  "resolved": {
-    "000LVU0B000000000015": "SCRM_ORA_STDB",
-    "000LVU0B00000000009O": "mysql_scrm_hnn_api"
-  },
-  "failed": []
-}
-```
+---
 
-同一セッション内で同じ ID を再度解決するとメモリキャッシュに命中し、リクエストは再送されません。
-
-### 4. `export` — Excel / JSON 出力
+### 4. `export` — folder 全体をエクスポート
 
 ```powershell
-python iics_cli.py export <folder> [--type ALL] [--details|--summary-only] [--format excel|json] [--filename NAME]
+python iics_cli.py export <folder> [--type DSS|MTT|WORKFLOW|ALL] [--details|--summary-only] [--format excel|json] [--filename NAME]
 ```
 
-| 引数 | 必須 | 説明 |
-|------|------|------|
-| `<folder>` | 必須 | 3 つの `JAPAN_*` フォルダのいずれか |
-| `--type` | 任意 | 既定 `ALL` |
-| `--details` | 任意 | **既定動作**。task ごとに詳細を取得し、Excel に runtime/connection 情報を含める |
-| `--summary-only` | 任意 | 詳細取得をスキップし task 一覧のみ出力。高速だが runtime/connection 列は空 |
-| `--format` | 任意 | 既定 `excel` |
-| `--filename` | 任意 | 既定はタイムスタンプで自動生成 |
+| parameter | 必須 | 説明 |
+|---|---|---|
+| `<folder>` | はい | 現在の account がアクセス権を持つ IICS folder（`JAPAN_*` 3 folder は検証済み） |
+| `--type` | いいえ | default `ALL` |
+| `--details` | いいえ | default behavior。full detail を取得してから export |
+| `--summary-only` | いいえ | list-level information のみ export。detail は取得せず高速 |
+| `--format` | いいえ | `excel`（default）または `json` |
+| `--filename` | いいえ | custom output file name |
 
-例：
+task type ごとに Excel column structure が異なります。
+
+| type | 列数 | 1 row の意味 |
+|---|---:|---|
+| DSS | 12 | 1 task = 1 row |
+| MTT | 23 | 1 Source または Target transformation = 1 row |
+| WORKFLOW | 9 | 1 child task = 1 row。child がなくても 1 row を保持 |
+
+`--type ALL` では固定順で複数 business sheet を生成します：`MTT Task → DSS Tasks → Workflow Tasks → Export Errors`。
+
+#### Export が完全成功したか判断する方法
+
+command が返す JSON には以下が含まれます。
+
+| field | 意味 |
+|---|---|
+| `task_count` | logical task count |
+| `rows` | Excel に実際に書き込まれた row 数 |
+| `failed_details_count` | detail query が失敗した task 数 |
+| `enrichment_warnings_count` | non-fatal enrichment warning 数（export success 自体には影響しない） |
+| `file_path` | output file path |
+
+**重要**：1 つの MTT または WORKFLOW が複数 row に展開されることがあるため、`rows` は `task_count` より大きくなることがよくあります。**これは正常で、error ではありません。** `rows == task_count` を export completeness 判定に使わないでください。正しい見方は：
+
+1. `failed_details_count` が 0 か
+2. 0 でなければ、どの task が失敗したか確認し、その他 success 分はそのまま有効
+3. `enrichment_warnings_count` は warning であり failure ではない
+
+---
+
+### 5. `export-selected` — 指定 task list のみをエクスポート
+
+明確な task list が手元にあり、folder 全体を export したいわけではない場合に使用します。
 
 ```powershell
-python iics_cli.py export JAPAN_COMMERCIAL_DWH --type DSS
+python iics_cli.py export-selected --input .\selected_tasks.json --output-dir .\exports
 ```
 
-戻り値：
-
-```json
-{
-  "file_path": "/path/to/iics_export_20260630_103000.xlsx",
-  "format": "excel",
-  "task_count": 83,
-  "rows": 96,
-  "failed_details_count": 0, "failed_details": [],
-  "enrichment_warnings_count": 0, "enrichment_warnings": [],
-  "summary": "..."
-}
-```
-
-Excel は 2 つの sheet を含みます（旧 `Field Mapping` / `Truncation Risk` は削除）：
-
-**task 種別ごとに専用 schema を使用**（共通列は廃止）：
-
-| 種別 | 列数 | 行モデル | 列 |
-|------|-----:|--------|----|
-| **DSS** | 12 | 1 task = 1 行 | `@type, id, FRS ID, orgId, Task Name, Task Type, Task Updated On, Source Connection, Source Object, Operation, Target Connection, Target Object` |
-| **MTT** | 23 | 各 Source/Target transformation = 1 行 | `@type, id, FRS ID, orgId, Task Name, Task Type, Task Location, Runtime Environment, Task Updated On, Mapping Name, Mapping Updated On, Transformation Name, Source Connection, Source Object, Custom Query, Target Connection, Operation, Target Object, Parameter File Directory, Parameter File Name, Pre-Processing Commands, Post-Processing Commands, Status` |
-| **WORKFLOW** | 9 | 各 `tasks[]` child = 1 行 | `Task Type, orgId, id, FRS ID, Task Name, updateTime, tasks.taskId, tasks.type, tasks.name`（Amendment 9：`id` の後に `FRS ID` を追加） |
-
-> **Amendment 9：`id` = classic V2 ID、`FRS ID` = FRS object ID（V3 discovery）**。三種別とも両方を出力します。
-
-単一種別の出力（`--type DSS` / `--type MTT` / `--type WORKFLOW`）は業務 sheet 名が `Task Summary`、加えて `Export Errors`（エラー/警告、両方無ければ 1 行 `No export errors`）。DSS の `Source Object` は `sourceObjects[0].name` のみ（単値、展開しない）。
-
-> フォルダには数千の task が存在し得ます。`--details` は task ごとに詳細を 1 回ずつ呼ぶため大きなフォルダでは時間がかかります。素早く一覧だけ見たい場合は `--summary-only`。
-
-#### `--type WORKFLOW` の出力（child task 展開）
-
-```powershell
-python .\iics_cli.py export JAPAN_SCRM_DI --type WORKFLOW --format excel
-```
-
-WORKFLOW の `Task Summary` は**専用 9 列**：`Task Type, orgId, id, FRS ID, Task Name, updateTime, tasks.taskId, tasks.type, tasks.name`（Amendment 9 で `id` の後に `FRS ID` を追加。`orgId/id` の並びは変更なし）。
-
-**各 workflow の `tasks[]` child が 1 行ずつ**展開され、親フィールド（`Task Type` / `orgId` / `id` / `Task Name` / `updateTime`）は各行に繰り返し、child フィールド（`tasks.taskId` / `tasks.type` / `tasks.name`）を個別表示します。例：
-
-```text
-1 workflow + 2 child task → Excel 2 行（親フィールドは 2 行とも同一）
-```
-
-child task が無い workflow も 1 行残します（child 3 列は空）。WORKFLOW export は child の MTT/DSS 詳細を照会しません。**WORKFLOW `get-task` の出力は不変**（従来のフラット detail）。
-
-> `--type ALL` の出力は 3 つの独立業務 sheet（固定順）：**`MTT Task`（23 列）→ `DSS Tasks`（12 列）→ `Workflow Tasks`（9 列、Amendment 9）**、加えて `Export Errors`。各種別が自分の schema を使い、DSS は MTT と同表になりません。
-
-### 4b. `export-selected` — 指定した Task List のみ出力
-
-`export <folder> --type X` は「その folder 内の全 X を出力」ですが、`export-selected` は「**渡したリストで指定した task だけを出力**」します——ある task が特定 folder にあるからといって、その folder の他の task まで出力することはありません。
-
-```powershell
-python .\iics_cli.py export-selected --input .\selected_tasks.json --output-dir .\exports
-```
-
-入力は JSON 配列。**Amendment 9：三種別とも `{name, type, folder}`**（`folder` は全種別で必須・trim 後非空。folder は FRS discovery に使用）:
+Python が受け付ける input は以下形式の JSON のみです。
 
 ```json
 [
-  {"name": "Task_A",     "type": "DSS",      "folder": "JAPAN_SCRM_DI"},
-  {"name": "Task_B",     "type": "MTT",      "folder": "JAPAN_SCRM_BAU"},
+  {"name": "Task_A", "type": "DSS", "folder": "JAPAN_SCRM_DI"},
+  {"name": "Task_B", "type": "MTT", "folder": "JAPAN_SCRM_BAU"},
   {"name": "Workflow_A", "type": "WORKFLOW", "folder": "JAPAN_COMMERCIAL_DWH"}
 ]
 ```
 
-> `folder` が欠落・空白の行があると **`SelectedTaskInputError` で即失敗**（API 呼び出し・workbook 生成ゼロ、exit 1）。selected 入力に `task_id` / `task_id_type` は指定できません。
+各 entry は `name`、`type`、`folder` の 3 field が必須です（3 task type 共通）。
 
-動作: 種別ごとに **独立した 3 つの Excel**（`selected_DSS_*.xlsx` / `selected_MTT_*.xlsx` / `selected_WORKFLOW_*.xlsx`、同一タイムスタンプ）を生成。ある種別のリストが空なら該当ファイルは生成しません。stdout には小さな summary JSON（`input_count / unique_count / duplicates_removed`、種別ごとの `requested/success/failed/rows/file_path`、`failures[]`、`warnings[]`）を返し、**完全な detail は含めません**。
+> Mode A では、Excel table、CSV、Markdown table、plain text を Claude Code に貼り付けて上記 JSON に整理させることができます。自分で JSON を手書きする必要はありません。
 
-主な制約:
+**duplicate 判定**：2 record が重複かどうかは `type` + `folder` + `name` の 3 項目が完全一致するかで決まります。同じ task name / type でも folder が異なれば別 task として扱い、**両方処理され、上書きされません**。
 
-- **DSS / WORKFLOW**（Amendment 9）: folder で FRS object を特定し `frs_id` を取得しますが、detail は V2 by-name のため、組織内の別 folder に同名があると by-name detail の folder 消歧はできません（summary warning で通知）。
-- **MTT は folder で確実に区別可能**（V3 で FRS object ID を特定、detail 消歧にも寄与）。
-- dedup キーは三種別とも `(type, folder, name)`——folder が異なる同名は別 FRS object として保持（ambiguous_input でブロックしません）。
-- 個別 task の失敗は全体を中断しません。入力 JSON 自体が不正な場合のみ全体失敗（exit 1）。
+export result は type ごとに個別 Excel file を生成します。例：`selected_DSS_20260909.xlsx`、`selected_MTT_20260909.xlsx`。今回対象のない type は file を生成しません。
 
-> Mode A（Claude Code）は Excel / CSV / Markdown 表 / 貼り付けテキストから上記 JSON を作成して呼び出せますが、Python の正式入力は **JSON のみ**。最終集計は summary を正とします。
+result JSON には以下が含まれます。
 
-### 安定性と出力判定
+| field | 意味 |
+|---|---|
+| `input_count` | raw input 件数 |
+| `unique_count` | dedup 後の件数 |
+| `duplicates_removed` | 完全 duplicate として除外された件数 |
+| `requested` / `success` / `failed` | type ごとの request / success / failure 数 |
+| `rows` | type ごとの実出力 row 数 |
+| `file_path` | type ごとの output path |
+| `failures` / `warnings` | failure detail / warning detail |
 
-- **`_request()` に timeout + 一時エラー再試行**：既定 timeout `(connect=10s, read=60s)`。`Timeout` / `ConnectionError` / HTTP `429/502/503/504` を最大 3 回再試行（backoff 1s→2s）。ログは stderr のみ・token を含まない。
-- **`export --details` は単一 task 失敗で中断しない**：主詳細の失敗は `failed_details`（`Export Errors` に記載）、`Task Summary` に当該 task 行は残す。MTT の mapping/runtime/connection **enrichment 失敗**は `enrichment_warnings` にのみ記録（該当欄は空）、`failed_details` には**計上せず**中断もしない。
-
-#### 出力判定基準
-
-| カウント | 意味 |
-|------|------|
-| `task_count` | 今回の論理 task 数。同一引数の `list-tasks` の `count` と一致すべき |
-| `rows` | Task Summary の実際の物理データ行数（MTT 展開後は `task_count` を**上回り得る**） |
-| **完全成功** | `task_count == list-tasks count` **かつ** `failed_details_count == 0` |
-| `enrichment_warnings_count > 0` | 一部 mapping/runtime/connection 未解決（該当欄空）；完全性判定には影響せず、`Export Errors` で確認可 |
-
-> 突合：`list-tasks --type X` で `count` を控え、`export --type X` の stdout で `task_count == count` かつ `failed_details_count == 0` を確認。**`rows == count` で完全性を判定しない**（MTT は複数行に展開）。
+単一 task の failure は command 全体の failure を意味しません。その他の success task は正常に file 出力されます。
 
 ---
 
-## 環境変数とパラメータ値
+## 環境変数リファレンス
 
-### 環境変数（必須は 1 つのみ）
+| variable | 必須 | 説明 |
+|---|---|---|
+| `IICS_SESSION_TOKEN` | **はい** | browser `USER_SESSION` Cookie value。「Session Token を取得」参照 |
 
-| 変数 | 必須 | 説明 |
-|------|------|------|
-| `IICS_SESSION_TOKEN` | **必須** | ブラウザの `USER_SESSION` Cookie 値。上記「Session Token の取得」を参照 |
-| `IICS_LOGIN_URL` / `IICS_USER` / `IICS_PASS` | 任意 | v0.1 では不要・未使用。将来の専用サービスアカウント方式に備えた枠組みで、現状は設定してもしなくても影響なし |
+以下 variable は framework 将来用に予約されており、v0.1 の現在の SSO 利用方式では設定不要です。
 
-### コマンド引数（環境変数ではなく、都度指定）
+| variable | 説明 |
+|---|---|
+| `IICS_LOGIN_URL` | default value あり。通常は override 不要 |
+| `IICS_USER` / `IICS_PASS` | 現行 version では未使用 |
 
-フォルダと task 種別は環境変数ではなく、`iics_cli.py` 実行時にコマンド引数として直接渡します。照会ごとに異なるフォルダ／種別が必要になるためです：
+---
 
-| 引数 | 有効値 |
-|------|---------|
-| folder | `JAPAN_COMMERCIAL_DWH`、`JAPAN_SCRM_BAU`、`JAPAN_SCRM_DI` |
-| task type | `DSS`、`MTT`、`WORKFLOW`、`ALL`（`ALL` は `list-tasks` / `export` のみ対応。`get-task` は具体的な種別の指定が必須） |
+## Command output format
 
-### スモークテスト専用の環境変数（日常利用とは無関係）
+すべての command は共通 output contract に従います。
 
-以下は `smoke_test.py` の受入テスト実行時のみ使用します。**日常の `iics_cli.py` 照会では設定不要です**：
+- **stdout**：machine-readable JSON result — parse / use すべき内容
+- **stderr**：progress log。human-readable で、business data は含まない
+- command normal completion：exit code `0`
+- top-level `{"error": ...}`：exit code `1`。command 全体の failure を意味する
 
-```powershell
-$env:IICS_TEST_FOLDER    = "JAPAN_SCRM_DI"      # 既定値
-$env:IICS_TEST_TASK_TYPE = "DSS"                # 既定値
-$env:IICS_TEST_TASK_NAME = "<実在の task 名>"     # 既定は空。自動的に先頭を使用
-python smoke_test.py
+batch operation（`export` / `export-selected`）では command 自体の exit code が `0` でも、一部 task failure や warning が result 内に含まれる場合があります。「file が生成されたか」だけで全件 success と判断せず、上記 `failed_details_count`（または `failed`）field を確認してください。
+
+---
+
+## 既知の制限（v0.1）
+
+- **strict read-only**：底層は GET request のみ許可し、変更操作は一切サポートしない。
+- **Token は手動取得で、自動更新しない**：期限切れ後は browser から再コピーが必要。
+- **DSS / WORKFLOW は cross-folder same-name で ambiguity があり得る**：detail query は name-based のため、指定 folder のものを 100% 保証できない。該当時は warning で通知。
+- **MTT はこの制限を受けない**：cross-folder same-name でも正確に区別できる。
+- **Mapping Location field は現時点で reliable data source がない**ため、推測値は表示しない。
+- **`rows` と `task_count` は異なる統計単位**であり、`rows` が大きくなるのは正常。
+
+---
+
+## Troubleshooting
+
+| 症状 | 想定原因 | 対応 |
+|---|---|---|
+| `py` / `python` が見つからない | Python 未導入、または PATH 未設定 | Python を再インストールし PowerShell を再起動 |
+| `ModuleNotFoundError` | dependency が現在の Python environment に未導入 | `py -m pip install -r requirements.txt` を再実行 |
+| `IICS_SESSION_TOKEN 未设置` | 現在の terminal window に token 未設定 | `$env:IICS_SESSION_TOKEN = "..."` を再実行 |
+| 401 または session expired | Token 期限切れ | browser から `USER_SESSION` を再取得して再設定 |
+| `get-task` で folder missing error | 3 task type すべて detail query に folder 必須 | `--folder <folder名>` を追加 |
+| DSS / WORKFLOW result に same-name warning | organization 内の別 folder に同名 task が存在 | warning 内容を確認し、必要に応じて追加情報で確認 |
+| Claude Code が許可済み command でも確認を出す | project workspace が未 trust、または local environment 差異 | workspace trust 済みか確認 |
+| Claude Code が IICS request を期待通り解釈しない | Skill 未 load | `.claude/skills/iics-agent/SKILL.md` の存在と path を確認 |
+| Excel file が生成されない | dependency 不足または output directory 書込失敗 | `openpyxl`、output directory、JSON の `error` を確認 |
+
+---
+
+## セキュリティ注意事項
+
+- `IICS_SESSION_TOKEN` は現在の terminal window の環境変数にのみ置き、window を閉じたら再設定する。
+- token を file に保存、print、Git commit、chat / mail / ticket に貼り付けない。
+- `curl` 等で official CLI を bypass して IICS endpoint へ直接アクセスしない。
+- Claude Code を `--dangerously-skip-permissions` で起動しない。
+- `.claude/settings.json` が制御するのは Claude Code が呼び出せる tool であり、IICS 自体の write protection ではない。本当の read-only guarantee は Python 実装にある。
+- `.claude/settings.local.json` は個人端末の local config で、project Git repository には commit しない。
+
+---
+
+## 参考ドキュメント
+
+日常利用では本マニュアルと以下 2 file だけ確認すれば十分です。
+
+```text
+CLAUDE.md                              — Agent behavior rule
+.claude/skills/iics-agent/SKILL.md     — IICS operation procedure
 ```
 
----
-
-## 出力フォーマット
-
-- **stdout は JSON のみ**を出力します。そのままスクリプトで解析できます。
-- **stderr は人間可読のログ**（進捗、`[Auth]` 情報、警告）を出力し、JSON には混入しません。
-- **終了コード**：成功は `0`、エラー（`IICS_SESSION_TOKEN` 未設定、API エラー、ツール関数が `{"error": ...}` を返した場合を含む）は `1`。PowerShell では `echo $LASTEXITCODE` で確認できます。スクリプト化時はこの値を確認すればよく、成否判定に JSON 内容を解析する必要はありません。
-
----
-
-## 既知の制約（v0.1 の境界）
-
-- **読み取り専用**：書き込み操作のサブコマンドは一切なく、コード上も `update`/`batch`/`safety` 関連ファイルは存在しません（権限による遮断ではありません）。
-- **DSS の `runtime_environment.name` は常に空**：API のデータ制約。上記 `get-task` の説明を参照。
-- **同名 task をフォルダ間で確実に区別できない**：必ず `--folder` を付けてください。
-- **MTT / WORKFLOW の runtime / connection フィールド構造は未検証**：v0.1 は主に DSS で完全なフィールド検証を実施。
-- **Token は自動更新されない**：失効後はブラウザから手動で再取得が必要。
-- **Excel は種別ごとに専用 schema**：DSS 12 列 / MTT 23 列 / WORKFLOW 9 列（Amendment 9：各 `id` の後に `FRS ID`）+ `Export Errors`；`--type ALL` は `MTT Task` / `DSS Tasks` / `Workflow Tasks` の 3 業務 sheet。MTT/WORKFLOW は複数行に展開され、`task_count` と `rows` は分離。
-
----
-
-## トラブルシューティング
-
-| 現象 | 考えられる原因 | 対処 |
-|------|----------|------|
-| `py は内部コマンド...ではありません` | Python 未インストール、または PATH 追加を未チェック | Python を再インストールし、"Add python.exe to PATH" を必ずチェック |
-| `python -m pip install` がエラー / 誤った場所に導入 | 企業端末に複数の Python バージョン | `py -m pip install -r requirements.txt` に統一 |
-| 仮想環境の有効化で `running scripts is disabled` | PowerShell の実行ポリシー制限 | `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`、または有効化せず `.\.venv\Scripts\python.exe` を直接使用 |
-| `{"error":"IICS_SESSION_TOKEN 未設定"}`、終了コード 1 | 環境変数が未設定、または新しいウィンドウ | `$env:IICS_SESSION_TOKEN = "..."` を再設定 |
-| `RuntimeError: IICS session expired...` | Token 失効（401） | ブラウザで `USER_SESSION` を再取得し設定し直す |
-| `list-tasks` が `{"error":...}` を返す | フォルダ名の誤り | 3 つの `JAPAN_*` のいずれかか確認 |
-| `get-task` の結果が期待した task と異なる | 同名 task のフォルダ間曖昧さ | 三種別とも `--folder` は必須（Amendment 9）。**MTT** は folder で確実に区別。**DSS / WORKFLOW** は folder で FRS object を特定できるが detail は by-name のため、組織内同名は by-name 消歧不可（既知の制約） |
-| Excel が開けない / sheet 欠落 | `openpyxl` の導入不良、または書き込み失敗 | `py -m pip install -r requirements.txt` を再実行し、ディレクトリの書き込み権限を確認 |
-| Claude Code 起動コマンドが構文エラー | PowerShell でバックスラッシュ `\` を継続行に使用 | PowerShell はバッククォート `` ` `` を使用。バックスラッシュ継続は Bash/WSL のみ有効 |
-| stdout に非 JSON が混入 | 発生してはならない不具合 | 完全なコマンドと出力を添えて開発者へ報告 |
-
----
-
-## セキュリティ上の注意
-
-- `IICS_SESSION_TOKEN` は現在のターミナルの環境変数にのみ存在します。ファイルに書かない・出力しない・git にコミットしない。
-- **token を Claude Code の対話、チャットツール、メール、チケットに貼らない**——エラー相談のためでも不可。問題の説明はマスキングしたスクリーンショットや文章で代替してください。
-- `curl` その他の方法で IICS に直接 POST/PUT/PATCH/DELETE を送らない——v0.1 のコード自体に書き込み経路はなく、迂回は無意味かつリスクがあります。
-- Mode A で Claude Code を起動する際、`--dangerously-skip-permissions` を使わない。
-
----
-
-## 参考
-
-本 README には日常利用に必要な全手順が含まれています。開発者向けの内部設計ドキュメントは、一般運用の利用前提ではありません。
+design background や historical decision rationale が必要な場合は、project 内の architecture decision record を参照してください。日常操作では読む必要はありません。

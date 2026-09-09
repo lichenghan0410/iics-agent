@@ -1,202 +1,349 @@
 # IICS Agent
 
-Takeda Japan IICS 运维工具，查询或改修三个 JAPAN_* 文件夹下的 task 配置并导出 Excel。
+Takeda Japan IICS 运维工具。
 
-**当前阶段：v0.1 Read-only MVP（只读模式，写操作不可用）。**
+**当前阶段：v0.1 Read-only MVP。**
 
-## 运行模式（v0.1）
+当前能力包括：
 
-- **Mode A（主）**：Claude Code CLI 读取本文件作为项目上下文，根据自然语言意图自动调用
-  下方 `iics_cli.py` 子命令。
-- **Mode C（辅）**：运维人员在终端**手动**执行同一组 `iics_cli.py` 命令（与 Mode A 生成的
-  命令完全一致）。下方「可用命令」即手动调用速查。
+- 查询 IICS task 列表
+- 查询 task 详情
+- 解析 connection ID
+- 导出 Excel / JSON
+- 导出用户指定的 task 清单
 
+v0.1 不支持任何 IICS 写操作。
 
-## 环境准备
+---
 
-```bash
-# 1. SSO 登录 IICS Web UI（Okta 弹窗验证）
-# 2. 浏览器 DevTools → Network 面板 → 任意 IICS 请求头中找 Cookie: USER_SESSION=<value>
-export IICS_SESSION_TOKEN="<USER_SESSION 值>"
-# Token 过期后 API 返回 401，需重新从浏览器获取并重新 export
-```
+## 运行模式
 
-## 可用命令
+### Mode A — Claude Code
 
-> v0.1 已实现并通过真实 token smoke test。Mode A 自动生成、Mode C 手动输入，命令一致。
+Claude Code 负责：
 
-```bash
-python iics_cli.py list-tasks <folder> [--type DSS|MTT|WORKFLOW|ALL] [--page-size N]
-python iics_cli.py get-task <task_name> <task_type> --folder PATH [--no-resolve]
-#   Amendment 9：三类型均需 --folder（FRS discovery 取 frs_id）；缺失 → MissingFolderError
-python iics_cli.py resolve-connection <id> [<id>...]
-python iics_cli.py export <folder> [--type ALL] [--format excel|json] [--filename NAME]
-# 只导出给定 list 中指定的 task（不是 folder 全量），按类型生成 3 个独立 Excel
-python iics_cli.py export-selected --input <selected_tasks.json> --output-dir <dir>
-```
+- 理解用户自然语言意图
+- 选择合适的 `iics_cli.py` capability
+- 整理必要输入
+- 调用 CLI
+- 解释 Python 返回的 JSON
+- 向用户报告结果
 
-## 覆盖范围
+### Mode C — Manual CLI
 
-- 文件夹：`JAPAN_COMMERCIAL_DWH` · `JAPAN_SCRM_BAU` · `JAPAN_SCRM_DI`
-- Task 类型：`DSS`（Sync Task）· `MTT`（Mapping Task）· `WORKFLOW`（Linear Taskflow）
-- IICS Org：`use4.dm-us.informaticacloud.com`（Takeda Prod）
+运维人员可以直接在终端执行同一套 `iics_cli.py` 命令。
 
-## 所有命令输出均为 JSON，可直接解析；日志和警告输出至 stderr
+Mode A 与 Mode C 使用完全相同的 Python 实现；唯一区别是命令由 Claude Code 生成还是由人工输入。
 
-## MTT 详情强制规则（Amendment 2）
+### 职责边界
 
-- MTT 的 name 查询**必须带 `--folder`**。
-- 必须通过 **V3 folder 枚举取得 FRS ID**，再调用 **`mttask/frs/{frs_id}`**。
-- **不得**调用裸 `mttask/{id}`。
-- **不得**回退 `mttask/name/{name}`。
-- **不得**接受用户直接传入 MTT `--id`。
-- 内部 task_id 调用**必须显式标记** `task_id_type="frs"`。
-- （Amendment 9）`task_id` 与 `folder_path` **不得同时提供**（→ ConflictingArgumentsError）；
-  DSS/WORKFLOW 的 frs 直传仍需 `task_name` 构造 by-name URL，故 name 不算冲突。
+**Agent：**
 
-## MTT 信息增强 / 导出（Amendment 3）
+- 输入理解
+- capability 选择
+- orchestration
+- 用户沟通与结果解释
 
-- MTT 归一化 detail：顶层 `id`=classic V2 ID、`frs_id`=V3/FRS ID（**无 `id_type`**）。
-- runtime 字段统一为 `runtime_environment {id,name}`（旧名 `runtime_agent` 已弃用）；
-  MTT 用 `runtimeEnvironmentId → runtimeEnvironment/{id}`，**不得**用 `agentId`。
-- mapping 用 `mappingId → mapping/{id}`（name/updated_on）；`Mapping Location` **不可靠获取、
-  不得推测**（Amendment 4 起从业务 Excel / compact 删除；normalized `task_mapping.location` 仍 null）。
-- transformation **只来自 MTT `parameters[]`**（顺序保留、不去重、不取首尾），不得用 mapping parameters。
-- **Transformation Name（Amendment 4）**：`parameter.name` 去首尾 `$` **优先**，name 缺失/空才
-  fallback `parameter.label`（label 可能只是 connection display label，不能作第一优先级）。
-- **`get-task MTT` 默认 compact output**（Task Summary 同款业务字段 records）；`--full` 才展示完整
-  normalized detail（诊断用）。DSS/WORKFLOW 保持扁平 dict、不受影响。`get_task_detail()` 返回值不变。
-- Excel：MTT 专属 `MTT_HEADERS`（**23 列，Amendment 9 起 id 后含 `FRS ID`**）+ `Export Errors`；
-  MTT 每个 transformation 一行。`id`=classic V2 ID、`FRS ID`=FRS object ID。
-- 计数：`task_count`（==list_tasks.count）与 `rows`（物理行数）**分离**；完整成功=task_count 一致
-  且 failed_details_count==0；**不得**用 `rows==task_count` 判断。
-- enrichment（mapping/runtime/connection）失败 → `enrichment_warnings`，**不**计入 `failed_details`、不终止导出。
+**Python：**
 
-## DSS / WORKFLOW 规则（Amendment 9 更新）
+- validation
+- FRS discovery
+- IICS API 调用
+- routing
+- parsing
+- caching
+- enrichment
+- Excel / JSON 生成
+- authoritative counts / failures / warnings / file paths
 
-- detail route 不变：DSS `dsstask/name/{name}`、WORKFLOW `workflow/name/{name}`。
-- **不得**用 V3 FRS ID 调 V2 by-id（`dsstask/{frs_id}` / `workflow/{frs_id}` 实测 500，MTT 特例）。
-- **（Amendment 9）三类型统一双 ID 契约**：normalized detail 同时含 `id`=classic V2 ID
-  （by-name response）与 `frs_id`=FRS object ID（folder-scoped V3 discovery）。
-- **get-task 三类型均需 `--folder`**：folder 用于 FRS discovery 取 `frs_id`。**但 DSS/WORKFLOW
-  的 folder 只保证 FRS discovery，不能用于 V2 by-name detail 消歧**（组织内其它 folder 存在
-  同名 task 时 by-name 无法按 folder 区分）。这是 by-name endpoint 限制，不是 ID 体系映射问题。
-- 内部编排层可传 `task_id=<frs_id>` + `task_id_type="frs"` 跳过 discovery（三类型一致；
-  CLI / selected 输入**不暴露**这两个参数）。`task_id` 与 `folder_path` 冲突 →
-  `ConflictingArgumentsError`；`task_id_type` 非 `"frs"` → `InvalidIdTypeError`（不发 HTTP）。
+不要在 Agent 层重新实现 Python 已负责的业务逻辑。
 
-## WORKFLOW export 规则（Amendment 5）
+---
 
-- WORKFLOW 详情继续用 `workflow/name/{name}`（不改路由；不得把 child `taskId` 当 V3 FRS ID）。
-- WORKFLOW export **只展开 `raw.tasks[]`**：一个 child = 一行；**不得**为 child 再查
-  `mttask/{id}` / `mttask/name/{name}` / `workflow/{child_id}` 等 child 详情。
-- WORKFLOW Excel 用**独立 9 列 schema（Amendment 9：id 后插入 `FRS ID`）**：`Task Type, orgId,
-  id, FRS ID, Task Name, updateTime, tasks.taskId, tasks.type, tasks.name`。父字段逐行重复。
-  （Amendment 8 曾为 8 列无 folder；Amendment 9 不重排 orgId/id，仅在 id 后插 FRS ID。）
-- 无 child 的 workflow 仍保留 1 行；detail 失败保留 1 fallback 行并计入 `rows`（按 `max(1,len)`）。
-- WORKFLOW `get-task` 输出不变（扁平 detail，含 `id` + `frs_id`）。
-- `--type WORKFLOW` 单类型：单张 9 列 `Task Summary`。
-- **`--type ALL`：三张独立业务 sheet，固定顺序 `MTT Task`(23) → `DSS Tasks`(12)
-  → `Workflow Tasks`(9) → `Export Errors`**（DSS 不再与 MTT 同表）。
+## Authentication
 
-## DSS export 规则（Amendment 7）
-
-- DSS 用独立 **12 列** `DSS_HEADERS`（Amendment 9：id 后含 `FRS ID`）：`@type, id, FRS ID, orgId,
-  Task Name, Task Type, Task Updated On, Source Connection, Source Object, Operation,
-  Target Connection, Target Object`；**1 task = 1 行**。`id`=classic、`FRS ID`=FRS object ID。
-- `Source Object` **只取 `sourceObjects[0].name`**（单值，不多值展开、不告警）。
-- DSS detail route **仍 `dsstask/name/{name}`**；folder 仅用于 FRS discovery 取 `frs_id`（回填）。
-- `get-task <name> DSS --folder <folder>` 默认 compact（records=DSS_HEADERS）；`--full` 完整 detail。
-
-## Selected Task Export（Amendment 6 / 9）
-
-- 用户给「混合 task 清单」时**不得**用 folder 全量 `export` 代替；整理成 JSON 调 `export-selected`。
-- **输入 schema 三类型统一（Amendment 9）**：`{name, type, folder}`，folder 对 **DSS / MTT /
-  WORKFLOW 都必需、trim 后非空**（folder 用于 FRS discovery 取 `frs_id`）。缺失/空白 folder →
-  `SelectedTaskInputError` 快速失败（0 API、0 workbook、exit 1）。selected 输入**不暴露**
-  `task_id` / `task_id_type`。
-- 去重键三类型统一 `(type, folder, name)`；跨 folder 同名（含 DSS/WORKFLOW）分属不同 FRS object，
-  **不去重、不 ambiguous_input 阻断**。
-- 每个 unique `(folder, type)` 只 discovery 一次（一次 `list_tasks`），取 `frs_id` 后直传 detail。
-
-## Mode A 构造 selected JSON 规则（Amendment 9）
-
-用户提供的原始 List 含 name | type | folder 三列。三种类型都**保留 folder**：
-
-```json
-[
-  {"name": "DSS_A", "type": "DSS", "folder": "Folder_A"},
-  {"name": "MTT_A", "type": "MTT", "folder": "Folder_A"},
-  {"name": "WF_A",  "type": "WORKFLOW", "folder": "Folder_B"}
-]
-```
-
-- 三类型的 folder 都必需。若任一行（含 DSS/WORKFLOW）**缺 folder 或 folder 为空**：不得调用
-  export-selected，向用户报告该行缺少必需的 folder（现在必须通过 folder 取得 FRS ID）。
-- **不得**再执行 Amendment 8 的「DSS/WORKFLOW 自动删除 folder」规则。
-
-执行顺序：
+IICS 使用浏览器 SSO `USER_SESSION` 值，并通过环境变量：
 
 ```text
-1. 读取所有行，trim name/type/folder
-2. type 标准化为 DSS / MTT / WORKFLOW
-3. 三类型均要求 folder；任一缺失/空 → 停止，报告给用户
-4. 一次性生成 selected_tasks.json（三类型都带 folder）
-5. 调用 export-selected
-6. 读取 stdout summary
-7. 向用户报告结果
+IICS_SESSION_TOKEN
 ```
 
-**用户沟通**：报告中必须说明 DSS / WORKFLOW 的 folder 语义：
+提供给 Python。
 
-> "DSS / WORKFLOW 的 folder 用于 FRS discovery（可靠取得对应 FRS object 的 frs_id），
-> 但其 detail 仍走 V2 by-name；当组织内其它 folder 存在同名 task 时，by-name detail
-> 无法按 folder 消歧（详见 warnings）。MTT 的 folder 同时参与 detail 消歧。"
+Token 过期后，需要由运维人员重新从浏览器获取 `USER_SESSION` 并重新设置环境变量。
 
-- **get-task 同理（Amendment 9）**：三类型都要向用户要 folder；缺失不要自行省略。
-- **不**逐条 `get-task` 把完整 detail 搬进 LLM 上下文；**不**自己生成 Excel；**不**自行统计
-  success/failed —— 最终数量、失败、文件路径**以 Python summary（stdout JSON）为准**。
-- Python 正式输入**只接受 JSON**（Agent 可从 Excel/CSV/Markdown/粘贴文本整理出该 JSON）。
-- Agent = 输入理解 + 编排 + 报告；Python = validation/discovery/API/cache/parse/Excel/summary。
+不得：
 
-## 安全边界
+- 输出 token
+- echo token
+- 将 token 写入文件
+- 将 token 写入日志
+- 将 token 提交 Git
+- 以任何形式向用户或其他输出暴露 token
 
-- v0.1 只读模式，以下操作不可用且不得实现：update、batch、write 相关子命令
-- 不得调用 IICS 写 API（curl、直接 requests POST/PUT/PATCH/DELETE 等均禁止）
-- 不得创建或修改 `tools/update.py`、`tools/batch.py`、`tools/safety.py`
-- 不得输出、打印、写入文件或以任何形式泄露 `IICS_SESSION_TOKEN`
-- 如果用户要求修改 runtime / connection，回答：当前 v0.1 不支持写操作，v0.2 版本提供
+人工获取 `USER_SESSION` 的完整操作步骤见：
 
-## 运行目录
+```text
+README.zh-CN.md
+```
+
+---
+
+## Scope
+
+支持的 IICS folders：
+
+- `JAPAN_COMMERCIAL_DWH`
+- `JAPAN_SCRM_BAU`
+- `JAPAN_SCRM_DI`
+
+支持的 task types：
+
+- `DSS`
+- `MTT`
+- `WORKFLOW`
+
+目标 IICS Org：
+
+```text
+use4.dm-us.informaticacloud.com
+```
+
+---
+
+## Tool Capabilities
+
+所有已支持的 IICS 操作必须通过：
+
+```text
+iics_cli.py
+```
+
+当前公开 capability：
+
+- `list-tasks`
+- `get-task`
+- `resolve-connection`
+- `export`
+- `export-selected`
+
+不要绕过现有 CLI / Python tool layer 自行重新实现已经支持的操作。
+
+完整命令 syntax、参数、task-type-specific procedure、selected export workflow 和结果解释规则放在：
+
+```text
+.claude/skills/iics-agent/SKILL.md
+```
+
+---
+
+## CLI Result Contract
+
+`iics_cli.py` 的输出契约：
+
+- stdout：machine-readable JSON result
+- stderr：progress / diagnostic logs
+- 成功命令退出码：`0`
+- 顶层返回 `{"error": ...}` 时退出码：`1`
+
+解释命令结果时：
+
+- 以 stdout JSON 为业务结果
+- 不把 stderr 日志当作业务数据
+- 不自行重新统计 Python 已返回的数量
+- Python 返回的 counts、failures、warnings、file paths 为权威结果
+
+单个 task 或 enrichment 失败不一定意味着整个命令出现顶层 fatal error；按具体 JSON result 判断。
+
+---
+
+## Critical IICS Invariants
+
+以下规则在所有相关 IICS 操作中始终成立。
+
+### Task identity and detail routing
+
+所有 `DSS` / `MTT` / `WORKFLOW` 的 `get-task` 操作都要求提供 `folder`，用于 folder-scoped FRS discovery。
+
+### MTT
+
+MTT detail 必须使用：
+
+```text
+mttask/frs/{frs_id}
+```
+
+不得：
+
+- 使用裸 `mttask/{id}` 作为正式 detail route
+- fallback 到 `mttask/name/{name}`
+- 绕过正式 CLI 自行构造替代 API route
+
+MTT 的 folder 参与可靠的 FRS detail identity，可以解决跨 folder 同名 MTT 的 detail 消歧。
+
+### DSS / WORKFLOW
+
+DSS detail 仍使用 V2 by-name：
+
+```text
+dsstask/name/{name}
+```
+
+WORKFLOW detail 仍使用 V2 by-name：
+
+```text
+workflow/name/{name}
+```
+
+其 required `folder` 用于 FRS discovery，并可靠取得对应 FRS object 的 `frs_id`。
+
+但是：
+
+**folder 不能给 DSS / WORKFLOW 的 V2 by-name detail endpoint 增加 folder 约束。**
+
+因此当组织内其他 folder 存在同名 DSS / WORKFLOW 时：
+
+- `frs_id` 可以可靠代表 folder-scoped FRS object
+- V2 by-name 返回的 classic detail 无法保证属于同一个 folder
+
+不得将 V3 FRS ID 直接作为 DSS / WORKFLOW 的 V2 by-id detail route。
+
+### MTT transformation source
+
+MTT transformations 的权威结果是 Python 已返回的 `transformations` 字段
+（来自 MTT `raw.parameters[]`，按原始顺序展开，不去重、不只取首尾）。
+
+不得：
+
+- 从 `raw` 数据自行重新提取或重新排序 transformations
+- 使用 Mapping 的 `parameters[]` 生成或补充 transformations
+
+### Mapping Location
+
+Mapping Location 当前没有可靠来源。
+
+不得：
+
+- 从 Task Location 推测 Mapping Location
+- 将 Task Location 填入 Mapping Location
+- 在没有可靠 API 数据时自行猜测该字段
+
+### Export counts
+
+以下指标语义不同：
+
+- `task_count`：逻辑 task 数
+- `rows`：业务 sheet 的物理输出行数
+- `failed_details_count`：主详情请求失败数
+- `enrichment_warnings_count`：enrichment warning 数
+
+MTT transformation 展开、WORKFLOW child 展开等情况会使：
+
+```text
+rows > task_count
+```
+
+因此：
+
+**不得使用 `rows == task_count` 作为 export 成功定义。**
+
+判断结果时必须使用 Python 返回的实际 summary、failures 和 warnings。
+
+### Selected task list
+
+当用户提供的是一份明确的 task 清单时：
+
+**必须使用 `export-selected`。**
+
+不得用：
+
+```text
+export <folder>
+```
+
+替代 selected export，因为 folder-wide export 会查询用户清单之外的 task。
+
+selected list 的输入整理、validation、dedup、FRS discovery 和 reporting procedure 由 `iics-agent` Skill 定义，并由 Python 执行最终校验和导出。
+
+---
+
+## Safety Boundary
+
+v0.1 是严格只读版本。
+
+不得：
+
+- 调用 IICS POST / PUT / PATCH / DELETE 业务 API
+- 实现 update / batch / write capability
+- 调用尚不存在的写操作逻辑
+- 使用 curl 或 ad-hoc HTTP request 绕过正式 CLI
+- 输出、记录、保存或泄露 `IICS_SESSION_TOKEN`
+
+不要创建或使用用于 v0.2 写操作的实现，例如：
+
+```text
+tools/update.py
+tools/batch.py
+tools/safety.py
+```
+
+Python HTTP client 是 executable safety enforcement 的权威层；Claude instructions 是行为约束，不替代 Python enforcement。
+
+如果用户要求修改 runtime、connection 或其他 IICS 配置，应明确说明：
+
+```text
+当前 v0.1 不支持写操作。
+```
+
+---
+
+## Working Directory
 
 默认认为 Claude Code 已经在 IICS Agent 项目根目录启动。
 
-如果用户在对话中明确说明“已经在项目根目录”，直接信任并执行任务，不要再用 `pwd`、`ls`、`dir`、`find` 等命令验证当前目录。
+如果用户明确说明已经位于项目根目录，直接信任并执行任务。
 
-不要主动搜索项目路径，不要遍历磁盘，不要猜测或切换到任何固定路径。
+不要为了确认目录而主动执行：
 
-只有在命令报错提示找不到项目文件时，才允许做一次最小检查。例如：
+```text
+pwd
+ls
+dir
+find
+```
 
-```text id="e7a3xf"
+不要：
+
+- 主动搜索项目位置
+- 遍历磁盘
+- 猜测固定安装路径
+- 自动切换到历史路径
+- 连续运行多个目录探测命令
+
+只有当实际命令明确出现项目文件找不到的错误时，例如：
+
+```text
 can't open file 'iics_cli.py'
 No such file or directory
 ModuleNotFoundError: No module named 'tools'
 ```
 
-此时只检查一次 `iics_cli.py` 是否存在：
+才允许做一次最小检查：
 
-```bash id="hzzqhn"
+```bash
 test -f iics_cli.py
 ```
 
-如果存在，继续执行原任务。
+如果文件存在，继续原任务。
 
-如果不存在，停止执行并提示用户：
+如果文件不存在，停止执行并提示用户：
 
-```text id="nz6m42"
+```text
 当前目录似乎不是 IICS Agent 项目根目录。请在包含 iics_cli.py 的目录重新启动 Claude Code，或提供实际项目路径。
 ```
 
-不要连续执行多个目录探测命令。
+不要继续遍历磁盘寻找项目。
 
-不要主动定位 Python 安装路径；只有在 `python ...` 命令失败并明确提示找不到 Python 时，才进行 Python 环境诊断。
+同样，不要主动定位 Python 安装路径。
+
+只有在 `python ...` 命令实际失败并明确提示 Python 不可用时，才进入 Python 环境诊断。

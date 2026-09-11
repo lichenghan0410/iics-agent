@@ -6,3 +6,11 @@ venv/
 *.xlsx
 *.jsonl
 .DS_Store
+
+# ── IICS credential 安全边界 ─────────────────────────────────────────────
+# 真实 credential 文件：精确匹配仓库根目录，绝不进 git
+/iics_credentials.json
+# 注意：不要添加 iics_credentials*.json / *.json 之类的宽泛规则，
+# 否则会误伤必须进 git 的 /iics_credentials.template.json
+# environment pin（不含 secret，但属本地运行状态）
+/.env_pins.json

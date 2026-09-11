@@ -27,7 +27,7 @@ IICS（Informatica Intelligent Cloud Services）上有大量 task，逐一在 We
 
 | 项 | 取值 |
 |---|---|
-| IICS 平台 host | `use4.dm-us.informaticacloud.com`（Informatica IICS 美区 pod 的统一 API 入口，Takeda 的 dev/test/prod 各个 org 共用同一个 host；实际访问的是哪个 org，完全由当前使用的 `IICS_SESSION_TOKEN` 决定，与 host 本身无关） |
+| IICS 平台 host | `use4.dm-us.informaticacloud.com`（Informatica IICS 美区 pod 的统一 API 入口，Takeda 的 dev/test/prod 各个 org 共用同一个 host；实际访问的是哪个 org，完全由 `--env` / `IICS_ENV` 选中的环境账号决定，与 host 本身无关；每个环境的 org 身份由 `orgUuid` 绑定校验） |
 | 已验证 folder | `JAPAN_COMMERCIAL_DWH`、`JAPAN_SCRM_BAU`、`JAPAN_SCRM_DI`等 |
 | Task 类型 | `DSS`（Sync Task）、`MTT`（Mapping Task）、`WORKFLOW`（Linear Taskflow） |
 
@@ -39,11 +39,13 @@ IICS（Informatica Intelligent Cloud Services）上有大量 task，逐一在 We
 |---|---|
 | 查询某 folder 下的 task 列表 | 修改 task runtime / connection |
 | 查看某个 task 的配置详情 | 批量变更 IICS 配置 |
-| 把 connection ID 解析成可读名称 | 自动续期浏览器 SSO token |
-| 导出一个 folder 的 Excel / JSON | 通过 CLI 调用 POST / PUT / PATCH / DELETE |
+| 把 connection ID 解析成可读名称 | 修改任何 IICS 侧配置 |
+| 导出一个 folder 的 Excel / JSON | 通过 CLI 调用 IICS 业务 `POST` / `PUT` / `PATCH` / `DELETE` |
 | 只导出用户指定的 task 清单 | 让 DSS / WORKFLOW 的 V2 by-name detail 按 folder 强制消歧 |
 
-v0.1 的写操作不是"有代码但被权限拦截"——Python 实现本身只允许发出 GET 请求，尝试其它方法会直接报错。
+v0.1 的写操作不是"有代码但被权限拦截"——业务 HTTP 客户端本身只允许发出 GET 请求，
+尝试其它方法会直接报错。唯一的例外是认证层的 Login `POST`（只用于取得 session，
+不经过业务客户端），它不构成任何 IICS 写能力。
 
 ---
 
@@ -54,8 +56,16 @@ IICS-Agent/
 ├── CLAUDE.md
 ├── iics_cli.py
 ├── iics_client.py
+├── iics_credentials.template.json   # 空值模板，进 Git
+├── iics_credentials.json            # 真实账号，不进 Git（.gitignore 排除）
+├── .env_pins.json                   # 环境 org 绑定，不含 secret（运行时生成）
+├── auth/                            # 认证 / 环境层（Login、credential、pin、异常）
 ├── tools/
 ├── cache/
+├── scripts/
+│   └── check_no_real_credentials.py
+├── tests/
+│   └── test_auth.py
 └── .claude/
     ├── settings.json
     ├── settings.local.json
@@ -69,6 +79,8 @@ IICS-Agent/
 | 文件 / 层 | 职责 |
 |---|---|
 | Python（`iics_cli.py` / `iics_client.py` / `tools/`） | IICS API 调用、数据解析、导出、GET-only 强制 |
+| `auth/` | 环境解析、credential 读取、Login（认证层唯一 POST）、environment pin、认证异常语义 |
+| `iics_credentials.json` / `.env_pins.json` | 真实账号（人工维护）/ 环境 org 绑定（程序维护）；均不进 Git |
 | `.claude/settings.json` | 项目共享的 Claude Code 运行权限；纳入 Git，团队共用 |
 | `.claude/settings.local.json` | 当前用户本机的个人权限覆盖；不纳入 Git |
 | `CLAUDE.md` | Agent 的项目级行为准则：认证方式、安全边界、工作目录规则 |
@@ -145,9 +157,9 @@ python -m pip install -r requirements.txt
 .\.venv\Scripts\python.exe .\iics_cli.py list-tasks JAPAN_SCRM_DI --type DSS
 ```
 
-### 3. 跑一次"无 token 预检"
+### 3. 跑一次"无环境预检"
 
-暂时不设置 token，先确认程序本身能跑起来：
+先不指定环境，确认程序本身能跑起来：
 
 ```powershell
 python .\iics_cli.py list-tasks JAPAN_SCRM_DI --type DSS
@@ -157,54 +169,160 @@ python .\iics_cli.py list-tasks JAPAN_SCRM_DI --type DSS
 
 ```json
 {
-  "error": "IICS_SESSION_TOKEN 未设置",
-  "error_type": "ValueError"
+  "error": "未指定 IICS 环境。请使用 --env DEV|TEST|PROD，或设置环境变量 IICS_ENV。本工具不会默认使用 PROD。",
+  "error_type": "MissingEnvironmentError"
 }
 ```
 
-看到这个结果说明 Python、依赖和 CLI 入口都正常，只缺 token，可以继续下一步。
+看到这个结果说明 Python、依赖和 CLI 入口都正常。**注意：工具永远不会默认使用 PROD**，
+不指定环境就直接失败，这是刻意的安全设计。
 
-### 4. 获取 Session Token
+### 4. 填写 credential 配置文件（只能由你本人完成）
 
-当前使用企业 SSO（Okta），没有独立的服务账号，token 需要每次手动从浏览器获取：
+仓库根目录有两个文件：
 
-1. 使用 Chrome / Edge 登录 IICS Web UI 并完成 SSO 验证。
-2. 按 `F12` 打开开发者工具，切到 **Network** 标签页。
-3. 刷新一下 IICS 页面。
-4. 点开任意一个正常的 IICS API 请求。
-5. 在 **Request Headers → Cookie** 里找到 `USER_SESSION=<一长串值>`。
-6. 只复制 `USER_SESSION=` 后面、到下一个分号 `;` 之前的那一段。
+| 文件 | 进 Git | 内容 |
+|---|---|---|
+| `iics_credentials.template.json` | ✅ 是 | 模板：只有键名和空字符串，永远不含真实账号 |
+| `iics_credentials.json` | ❌ 否（`.gitignore` 精确排除） | 真实值，由你本人手工填写 |
 
-### 5. 设置 Token
+如果 `iics_credentials.json` 还不存在，复制模板：
 
 ```powershell
-$env:IICS_SESSION_TOKEN = "<刚才复制的 USER_SESSION 值>"
+Copy-Item .\iics_credentials.template.json .\iics_credentials.json
 ```
 
-这个值只应该存在于**当前这个终端窗口**的环境变量里。
+然后用编辑器打开 `iics_credentials.json`，把三个环境的 `username` / `password`
+填进去（只填你实际需要用的环境即可，留空的环境在被调用时会报
+`MissingCredentialsError`）：
 
-**不要**：
+```json
+{
+  "schema_version": 1,
+  "login_url": "https://dm-us.informaticacloud.com/ma/api/v2/user/login",
+  "environments": {
+    "DEV":  { "aliases": ["dev", "development", "開発", "開発環境"], "username": "", "password": "" },
+    "TEST": { "aliases": ["test", "testing", "テスト", "テスト環境"], "username": "", "password": "" },
+    "PROD": { "aliases": ["prod", "production", "本番", "本番環境"], "username": "", "password": "" }
+  }
+}
+```
 
-- 写入 `.env` 或任何配置文件
-- 打印、echo 出来
-- 提交到 Git
-- 粘贴到 Claude Code 对话、邮件、聊天工具或工单里（即使是为了报错求助，也请用截图打码或文字描述代替）
+说明：
 
-Token 过期后（表现为命令返回 401 或 session expired），需要重新从浏览器获取并重新执行上面这条命令。关掉终端窗口后，token 也需要重新设置。
+- `login_url` 三个环境共用顶层这一个值，不需要重复配置。
+  只有将来某个环境确实需要不同的 Login URL，才在该环境对象里单独加 `login_url` 覆盖。
+- `aliases` 决定 `--env` 能接受哪些写法（例如 `--env テスト` 等价于 `--env TEST`）。
+- **不要**把这个文件提交到 Git；`.gitignore` 里的 `/iics_credentials.json` 已经排除它。
+- **不要**把账号密码贴到 Claude Code 对话、邮件、聊天工具或工单里。
+
+如果你希望把真实文件放到仓库以外（例如更严格的部署环境），可以设置逃生舱环境变量：
+
+```powershell
+$env:IICS_CONFIG_FILE = "D:\secure\iics_credentials.json"
+```
+
+日常使用不需要设置它。
+
+### 5. 首次环境绑定：auth-check → 人工确认 → auth-pin
+
+这一步的目的是防止「配置里把 PROD 的账号填到了 TEST 那一栏」这类事故被静默接受。
+
+**第一步：只读检查**
+
+```powershell
+python .\iics_cli.py auth-check --env TEST
+```
+
+返回类似：
+
+stdout（机器可解析 JSON，未 pin 时**恰好**这 5 个字段）：
+
+```json
+{
+  "environment": "TEST",
+  "status": "pin_required",
+  "org_id": "000LVT",
+  "org_uuid": "<ORG_UUID>",
+  "server_host": "use4.dm-us.informaticacloud.com"
+}
+```
+
+stderr（人工操作提示，不属于 stdout JSON contract）：
+
+```text
+[IICS CLI] 环境 TEST 尚未绑定：请人工核对上面输出的 org_id / org_uuid 是否确实属于 TEST 环境；
+           确认无误后再执行 `python iics_cli.py auth-pin --env TEST`。
+```
+
+`auth-check` 只登录、只展示身份，**不会**写任何绑定，也**不会**输出 session ID、
+账号密码、账号 `id` 或 Login 原始响应体的其余字段。
+
+已绑定时 stdout 多一个 `pinned_at`；身份不一致时 status 为 `pin_mismatch`，
+多出 `pinned_org_uuid` / `error_type` / `error` 并以退出码 1 结束。
+
+**第二步：人工核对 `org_id`**
+
+已知的短码对应关系：
+
+```text
+000LA8 → DEV
+000LVT → TEST
+000LVU → PROD
+```
+
+如果 `--env TEST` 返回的是 `000LVU`，说明配置填错了环境 —— **不要 pin**，
+回到 `iics_credentials.json` 改正。
+
+**第三步：确认无误后才绑定**
+
+```powershell
+python .\iics_cli.py auth-pin --env TEST
+```
+
+绑定结果写入 `.env_pins.json`（该文件只保存 `org_uuid` / `org_id` / `pinned_at`，
+不含任何账号、密码或 session）。三个环境各做一次。
+
+绑定后的行为：
+
+- 未 pin 的环境 → `EnvironmentPinRequiredError`，所有业务命令被阻断
+- Login 得到的 `org_uuid` 与已绑定值不一致 → `EnvironmentMismatchError`，同样阻断
+- 已有绑定**不会**被自动覆盖；确需重新绑定时，由你本人执行 `auth-pin --env TEST --force`
 
 ### 6. 跑通第一条真实命令
 
 ```powershell
-python .\iics_cli.py list-tasks JAPAN_SCRM_DI --type DSS
+python .\iics_cli.py --env TEST list-tasks JAPAN_SCRM_DI --type DSS
 echo $LASTEXITCODE
 ```
+
+也可以设置一次环境变量，省掉每条命令的 `--env`：
+
+```powershell
+$env:IICS_ENV = "TEST"
+python .\iics_cli.py list-tasks JAPAN_SCRM_DI --type DSS
+```
+
+优先级：`--env` > `IICS_ENV` > 失败（不默认 PROD）。
+
+`--env` 放在子命令前后都可以，但**每条命令只允许出现一次**。重复指定会直接失败
+（即使两次取值相同），不存在"后一个覆盖前一个"这种行为：
+
+```powershell
+python .\iics_cli.py --env DEV auth-check --env TEST   # ❌ DuplicateEnvironmentArgumentError，退出码 1
+```
+
+用环境变量 `IICS_ENV` 再配一个命令行 `--env` **不算重复** —— 那是既有的优先级设计，
+命令行取值生效。
 
 | `$LASTEXITCODE` | 含义 |
 |---|---|
 | `0` | 命令正常完成，查看 stdout 里的 JSON 结果 |
 | `1` | 出现顶层 fatal error，查看 JSON 里的 `error` 字段 |
 
-看到正常的 JSON 输出（哪怕 `count` 是 0），说明环境已经跑通，可以进入日常使用。
+登录是自动的：每次 CLI 进程启动时用配置里的账号密码登录一次，该进程内的所有
+API 调用复用同一个 session；session 失效时自动重新登录一次并重试。进程退出后
+session 即丢弃，不写入任何文件。
 
 ---
 
@@ -222,13 +340,16 @@ echo $LASTEXITCODE
 ### Mode C：手动执行
 
 ```powershell
-$env:IICS_SESSION_TOKEN = "<USER_SESSION 值>"
+$env:IICS_ENV = "TEST"          # 或在每条命令上加 --env TEST
 
 python iics_cli.py list-tasks JAPAN_SCRM_DI --type DSS
 python iics_cli.py get-task DI_FACT_SALES_DAILY DSS --folder JAPAN_SCRM_DI
 python iics_cli.py resolve-connection 000LVU0B000000000015
 python iics_cli.py export JAPAN_COMMERCIAL_DWH --type ALL
 ```
+
+前提：该环境已在 `iics_credentials.json` 中填好账号，且已完成
+`auth-check` → 人工核对 → `auth-pin`。
 
 Mode C 不经过 Claude Code，因此不受 `.claude/settings.json` 权限配置影响，也不需要安装 Claude Code。
 
@@ -261,7 +382,21 @@ claude
 
 ## 功能详解（Mode A / Mode C 通用）
 
-v0.1 公开 5 个只读子命令，以下命令语法在两种模式下完全一致。
+本节详解 5 个**业务 / 数据操作**子命令，命令语法在两种模式下完全一致。
+
+当前 CLI 共 7 个子命令：除下面这 5 个外，还有 2 个**认证生命周期管理**命令
+`auth-check` / `auth-pin`，用法见前面的「首次环境绑定」一节。
+
+"只读"的准确含义按命令类别区分：
+
+| 命令类别 | 对 IICS 的行为 | 本地写入 |
+|---|---|---|
+| 业务 / 数据命令（本节 5 个） | IICS 业务 API 严格 **GET-only** | `export` / `export-selected` 写出 Excel / JSON 文件 |
+| `auth-check` | 只发认证 Login `POST`，**不执行任何 IICS 业务写** | 无 |
+| `auth-pin` | 只发认证 Login `POST`，**不执行任何 IICS 业务写** | 写本地 `.env_pins.json`（环境身份 metadata） |
+
+即：**IICS 业务 API 全程只读；Login `POST` 只属于认证生命周期；`auth-pin` 的写操作仅限
+本地 environment pin metadata。** 完整边界论证见 ADR-001 的 D-5 与 Amendment 10。
 
 ### 1. `list-tasks` — 枚举 folder 下的 task
 
@@ -457,14 +592,19 @@ Python 只接受这样格式的 JSON 输入：
 
 | 变量 | 是否必需 | 说明 |
 |---|---|---|
-| `IICS_SESSION_TOKEN` | **是** | 浏览器 `USER_SESSION` Cookie 的值，见"获取 Session Token"一节 |
+| `IICS_ENV` | 二选一 | 目标环境（`DEV` / `TEST` / `PROD` 或配置中的 alias）。与命令行 `--env` 二选一，`--env` 优先。两者都没有则命令失败，**不会默认 PROD** |
+| `IICS_CONFIG_FILE` | 否 | 覆盖 credential 配置文件路径。默认读取 `<仓库根>/iics_credentials.json` |
+| `IICS_PIN_FILE` | 否 | 覆盖 environment pin 文件路径。默认 `<仓库根>/.env_pins.json` |
 
-以下变量属于程序框架预留，v0.1 当前的 SSO 使用方式下不需要设置：
+以下变量只用于 legacy 调试模式，日常不需要：
 
 | 变量 | 说明 |
 |---|---|
-| `IICS_LOGIN_URL` | 有默认值，日常不需要覆盖 |
-| `IICS_USER` / `IICS_PASS` | 当前版本不使用 |
+| `IICS_AUTH_MODE` | 设为 `legacy_token` 时启用手动 token 模式 |
+| `IICS_SESSION_TOKEN` | legacy 模式下使用的浏览器 `USER_SESSION` 值 |
+
+**legacy 模式警告**：它不解析环境、不受 environment pin 保护、session 失效后无法自动
+重新登录。仅供排障，不要用它绕开环境保护。
 
 ---
 
@@ -483,8 +623,10 @@ Python 只接受这样格式的 JSON 输入：
 
 ## 已知限制（v0.1）
 
-- **严格只读**：底层只允许发出 GET 请求，不支持任何形式的修改操作。
-- **Token 需要手动获取，不会自动续期**：过期后需要重新从浏览器复制。
+- **IICS 侧严格只读**：业务 HTTP 客户端只允许发出 GET 请求，不支持任何形式的 IICS 配置修改。（认证层的 Login `POST` 与 `auth-pin` 写本地 `.env_pins.json` 不属于 IICS 写操作。）
+- **每次命令都要指定环境**：`--env` 或 `IICS_ENV`，两者都没有就直接失败；工具不会默认 PROD。
+- **环境必须先绑定**：未完成 `auth-check` → 人工确认 → `auth-pin` 的环境，所有业务命令都会被阻断。
+- **session 不跨进程复用**：每次执行 CLI 都会重新登录一次；进程内自动复用并在失效时自动重新登录，但进程退出后 session 即丢弃（刻意不落盘）。
 - **DSS / WORKFLOW 在跨 folder 同名时可能存在歧义**：查询详情时按名称匹配，无法百分之百保证拿到你指定 folder 下的那一份，如有提示会以 warning 形式告知。
 - **MTT 不受此限制**：可以在跨 folder 同名的情况下准确区分。
 - **Mapping Location 字段当前没有可靠数据来源**，不会显示推测值。
@@ -498,8 +640,16 @@ Python 只接受这样格式的 JSON 输入：
 |---|---|---|
 | `py` / `python` 提示找不到命令 | Python 未安装，或安装时没勾选加入 PATH | 重新安装 Python 并重启 PowerShell |
 | `ModuleNotFoundError` | 依赖没有装到当前使用的 Python 环境 | 重新执行 `py -m pip install -r requirements.txt` |
-| 返回 `IICS_SESSION_TOKEN 未设置` | 当前终端窗口没有设置 token | 重新执行 `$env:IICS_SESSION_TOKEN = "..."` |
-| 返回 401 或 session expired | Token 已过期 | 回到浏览器重新获取 `USER_SESSION` 并重新设置 |
+| 返回 `MissingEnvironmentError` | 没有指定环境 | 加 `--env TEST`，或设置 `$env:IICS_ENV = "TEST"` |
+| 返回 `UnknownEnvironmentError` | 环境名 / alias 不在配置里 | 对照 `iics_credentials.json` 中各环境的 `aliases` |
+| 返回 `DuplicateEnvironmentArgumentError` | 同一条命令写了两次 `--env` | 只保留一个 `--env`。工具刻意不做"后一个覆盖前一个" |
+| 返回 `CredentialConfigError` | 配置文件不存在或 JSON 非法 | 从模板复制一份 `iics_credentials.json`，用编辑器检查 JSON 语法 |
+| 返回 `MissingCredentialsError` | 该环境的 username / password 还是空字符串 | 手工填入该环境账号 |
+| 返回 `InvalidCredentialsError` | Login 被拒（401/403） | 检查该环境账号是否正确、是否被锁定。工具不会自动重试，避免触发锁定 |
+| 返回 `EnvironmentPinRequiredError` | 该环境还没有完成首次绑定 | 执行 `auth-check` → 人工核对 org → `auth-pin` |
+| 返回 `EnvironmentMismatchError` | 本次登录的 org 与已绑定的不一致 | 极可能是配置里环境填错了。先核对配置，不要随便 `--force` |
+| 返回 `PermissionDeniedError` | HTTP 403：session 有效但权限不足 | 该账号在目标 org 缺少对应权限，需要找 IICS 管理员 |
+| 返回 `AuthenticationError` | 自动重新登录后仍然 401 | 确认该账号在目标 org 是否仍然有效 |
 | `get-task` 报错缺少 folder | 三种 task 类型查详情都必须提供 folder | 补上 `--folder <folder名称>` |
 | DSS / WORKFLOW 结果里出现同名相关提示 | 组织内其它 folder 存在同名 task | 按提示内容判断，必要时用其它信息进一步确认 |
 | Claude Code 对已允许的命令仍然弹出确认框 | 项目 workspace 还没有被信任，或本地环境差异 | 确认是否已经完成 workspace 信任确认 |
@@ -510,8 +660,12 @@ Python 只接受这样格式的 JSON 输入：
 
 ## 安全须知
 
-- `IICS_SESSION_TOKEN` 只应该存在于当前终端窗口的环境变量里，关闭窗口后即失效。
-- 不要把 token 写进文件、打印出来、提交到 Git，或粘贴到任何对话、邮件、工单里。
+- `iics_credentials.json` 里是真实账号密码。它被 `.gitignore` 精确排除（`/iics_credentials.json`），**不要**删除或弱化这条规则。
+- `iics_credentials.template.json` 必须保持进 Git，且其中 `username` / `password` 永远是空字符串，连示例值都不要写。
+- 不要把账号密码或 session ID 打印出来、写进其它文件、提交到 Git，或粘贴到任何对话、邮件、工单里（报错求助请用打码截图或文字描述）。
+- 提交前可以跑一次 `python scripts/check_no_real_credentials.py`，确认真实 credential 文件没有进入暂存区（该脚本只看路径，不读内容）。
+- 不要执行 `git add -A` 或 `git add .`。
+- session 只存在于 CLI 进程内存中，不会写入任何文件；`.env_pins.json` 只保存 org 身份，不含密码或 session。
 - 不要用 `curl` 等方式绕开正式 CLI 直接访问 IICS 接口。
 - 不要使用 `--dangerously-skip-permissions` 启动 Claude Code。
 - `.claude/settings.json` 控制的是 Claude Code 能调用哪些工具，不是 IICS 本身的写保护；真正的只读保证由 Python 实现本身提供。

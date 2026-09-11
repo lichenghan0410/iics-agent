@@ -62,32 +62,125 @@ Mode A 与 Mode C 使用完全相同的 Python 实现；唯一区别是命令由
 
 ## Authentication
 
-IICS 使用浏览器 SSO `USER_SESSION` 值，并通过环境变量：
+**Amendment 10 起：主路径为多环境 username/password 自动 Login。**
 
 ```text
-IICS_SESSION_TOKEN
+--env / IICS_ENV
+    ↓
+CredentialConfig（<repo_root>/iics_credentials.json）
+    ↓
+SessionManager.login()  →  POST /ma/api/v2/user/login
+    ↓
+serverUrl + icSessionId + orgId + orgUuid
+    ↓
+environment pin guard（.env_pins.json，TOFU orgUuid）
+    ↓
+IICSClient（业务 GET；V2 用 icSessionId，V3 用 INFA-SESSION-ID，同一个 session）
 ```
 
-提供给 Python。
-
-Token 过期后，需要由运维人员重新从浏览器获取 `USER_SESSION` 并重新设置环境变量。
-
-不得：
-
-- 输出 token
-- echo token
-- 将 token 写入文件
-- 将 token 写入日志
-- 将 token 提交 Git
-- 以任何形式向用户或其他输出暴露 token
-
-人工获取 `USER_SESSION` 的完整操作步骤见：
+### 环境选择
 
 ```text
-README.zh-CN.md
+CLI --env  →  IICS_ENV  →  失败（MissingEnvironmentError）
 ```
 
----
+不默认 PROD。不得根据 folder 名 / username / serverUrl / org 名猜测环境。
+
+`--env` 可以放在子命令前或子命令后，但**每条命令只允许出现一次**。
+重复出现（即使取值相同）→ `DuplicateEnvironmentArgumentError`、退出码 1，
+且在读取 credential / 发起 Login 之前就失败。不存在 first-wins / last-wins。
+
+```text
+python iics_cli.py --env TEST auth-check              ✅
+python iics_cli.py auth-check --env TEST              ✅
+python iics_cli.py --env DEV auth-check --env TEST    ❌ Duplicate
+IICS_ENV=DEV + --env TEST                             ✅ 用 TEST（既有优先级，不算重复）
+```
+
+支持的环境键与 alias 以 `iics_credentials.json` 各环境的 `aliases` 字段为准。
+
+### Credential 文件
+
+```text
+<repo_root>/iics_credentials.template.json   ← 进 git，值恒为空字符串
+<repo_root>/iics_credentials.json            ← 不进 git（.gitignore 精确排除），真实值由使用者本人填写
+```
+
+可选逃生舱：`IICS_CONFIG_FILE=<path>` 覆盖真实文件路径（非主路径）。
+
+### Legacy token 模式（仅调试）
+
+```text
+IICS_AUTH_MODE=legacy_token + IICS_SESSION_TOKEN
+```
+
+必须显式开启；不解析环境、不受 environment pin 保护、无法自动 refresh。
+默认路径永远是 username/password Login，legacy 不得用于绕过环境保护。
+
+### Agent 安全规则（强制）
+
+- 只有用户明确指定环境时才传对应 `--env`
+- 不默认 PROD
+- 不自行猜环境
+- 不读取 `iics_credentials.json` 的内容
+- 不创建、不填写、不修改 credential 文件的 username / password
+  （空值骨架已由 Amendment 10 实施一次性生成，后续由使用者本人维护）
+- 只允许创建 / 编辑 `iics_credentials.template.json`，且其中 `username` / `password`
+  必须保持空字符串（连示例值也不允许）
+- 不输出 password
+- 不输出 session ID / icSessionId
+- 不输出 Login 原始响应体，或其中的 `roles` / `usergroups` / `emails` /
+  `securityQuestion` / `securityAnswer` / `password` 等字段
+- 不代替用户确认首次 environment pin
+- 只有用户在对话中明确确认 org identity 正确后，才能执行 `auth-pin`
+- 不允许覆盖已有 pin，除非用户明确要求重新绑定（`auth-pin --force`）
+- 不得将 `iics_credentials.json`（真实文件）加入 git 暂存区、提交或推送
+- 不得执行 `git add -A` / `git add .`（可能把真实 credential 文件带进暂存区）
+- 不得移除、注释掉或弱化 `.gitignore` 中对 `iics_credentials.json` 的排除规则
+- 发现 `iics_credentials.json` 已被 git 追踪时，立即停止并报告给用户，
+  不自行执行 `git rm --cached` 或任何历史重写
+
+### 首次环境绑定流程（TOFU + 人工确认，Agent 不得自动完成）
+
+```text
+Agent 执行 auth-check --env <ENV>
+    ↓
+把 org_id / org_uuid / server_host 展示给用户
+    ↓
+【必须在此停止，等待用户在对话中用文字明确确认】
+    ↓
+用户确认后，Agent 才能在下一个回合执行 auth-pin --env <ENV>
+```
+
+### 认证命令的 stdout contract
+
+`auth-check` / `auth-pin` 的 stdout 是 machine-readable JSON，按 status 走明确
+allowlist；人工操作提示一律走 stderr。
+
+| 命令 / status | stdout 顶层 key |
+|---|---|
+| `auth-check` / `pin_required` | `environment` `status` `org_id` `org_uuid` `server_host`（**恰好 5 个**） |
+| `auth-check` / `pinned` | 上述 5 个 + `pinned_at` |
+| `auth-check` / `pin_mismatch` | 上述 5 个 + `pinned_org_uuid` `error_type` `error` |
+| `auth-pin` / `pinned`、`already_pinned` | `environment` `status` `org_id` `org_uuid` `server_host` `pinned_at` `pin_file` |
+| 顶层 fatal error | `error` `error_type` |
+
+任何 status 下 stdout 都禁止出现：`username`、`password`、`icSessionId` /
+`session_id`、`id`、`roles`、`usergroups`、`emails`、`securityQuestion`、
+`securityAnswer`、Login 原始响应体、任何 Authorization/Header。
+
+不得把 Login 原始 dict 透传给 CLI 输出；CLI 只能基于最小化身份对象构造结果。
+
+`org_id` 短码与环境的已知对应关系（仅供人工核对，不作为强校验值）：
+
+```text
+000LA8 → DEV
+000LVT → TEST
+000LVU → PROD
+```
+
+强身份唯一以 `orgUuid` 为准。`username` / `serverUrl` / `server host` / `org_id`
+均不得作为强身份。
 
 ## Scope
 
@@ -121,6 +214,8 @@ iics_cli.py
 
 当前公开 capability：
 
+- `auth-check`（只读认证检查，不写 pin）
+- `auth-pin`（环境绑定，必须在用户人工确认之后）
 - `list-tasks`
 - `get-task`
 - `resolve-connection`
@@ -286,6 +381,25 @@ tools/update.py
 tools/batch.py
 tools/safety.py
 ```
+
+Login POST（`auth/login.py`）是认证层唯一允许的 POST，**不等于**给业务 Client 增加写能力：
+
+```text
+SessionManager / auth layer
+    └── requests.post(Login API)   ← 仅认证
+
+IICSClient._request()
+    └── GET ONLY                   ← 所有业务 API
+```
+
+`IICSClient._request()` 中的：
+
+```python
+if method != "GET":
+    raise ValueError("v0.1 only supports GET requests")
+```
+
+是必须保留的安全回归点，不得为了 Login 而放宽。
 
 Python HTTP client 是 executable safety enforcement 的权威层；Claude instructions 是行为约束，不替代 Python enforcement。
 

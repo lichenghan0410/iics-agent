@@ -4,7 +4,8 @@
 「需要在 v0.2 前重新确认」各项的落地结论，供 v0.2 写操作开发与后续维护参考。
 
 - 环境：`use4.dm-us.informaticacloud.com`（Takeda Prod Org）
-- 认证：企业 SSO（Okta），手动从浏览器提取 `USER_SESSION` Cookie
+- 认证（本文第 1 节的 2026-06-29 联调当时）：企业 SSO（Okta），手动从浏览器提取 `USER_SESSION` Cookie
+- 认证（Amendment 10 起的默认路径）：多环境 username/password 自动 Login，见 §1.1。手动 `USER_SESSION` 已降级为 legacy 调试模式
 - 联调日期：2026-06-29
 - 验证文件夹：`JAPAN_SCRM_DI`
 - 结论以**实测为准**，与 ADR / 官方 KB 的差异已在下文标注。
@@ -21,9 +22,76 @@
 | V3 | `INFA-SESSION-ID: <USER_SESSION>` | ✅ 200（`/saas/public/core/v3/objects`） |
 | V3（误用）| `Cookie: USER_SESSION=<...>` | ❌ 401 |
 
+> 本节记录的是 v0.1 初期的手动 token 用法。Amendment 10 起默认路径为 §1.1 的
+> Login API；两者产出的 session 值在 header 用法上完全一致。
+
 **结论**：Takeda 环境下 `USER_SESSION` Cookie 值可直接作为 `icSessionId`（V2）/
 `INFA-SESSION-ID`（V3）的 header value，与 ADR D-2 假设一致。**不能**用 `Cookie:`
 头方式传（401）。这是 Takeda 环境特定行为，非 IICS 通用规范。
+
+---
+
+### 1.1 V2 Login API（Amendment 10，Postman 实测）
+
+```text
+POST https://dm-us.informaticacloud.com/ma/api/v2/user/login
+Content-Type: application/json
+Accept: application/json
+
+{"username": "<env account>", "password": "<env password>"}
+```
+
+响应（**只允许提取以下字段，其余读取后立即丢弃**）：
+
+| 字段 | 用途 | 是否可展示 |
+|------|------|-----------|
+| `icSessionId` | V2/V3 共用的 session 值 | ❌ 绝不输出 |
+| `serverUrl` | 本次会话的 pod 基址；每次以当前响应为准 | ⚠️ 仅 host 部分可展示 |
+| `orgUuid` | **环境身份唯一强校验值**（TOFU pin） | ✅ |
+| `orgId` | 短码，人工核对辅助 | ✅ |
+| `id` | 账号标识，仅排障用 | ❌ 不在 CLI 输出中展示 |
+
+响应体中**同时存在但必须丢弃**的字段（不写日志 / 不落盘 / 不入异常）：
+
+```text
+roles[]
+usergroups[]（含内部维护人邮箱 createdBy / updatedBy）
+emails
+securityQuestion（安全问题原文）
+password / securityAnswer（IICS 已脱敏为 "********"，非真值，但仍不保留）
+```
+
+实测确认：响应中**不存在** `orgName` 或其它 org 显示名字段。
+
+**同一 icSessionId 可同时用于 V2 与 V3**：
+
+| API | 认证 Header |
+|-----|------------|
+| V2 | `icSessionId: <icSessionId>` |
+| V3 | `INFA-SESSION-ID: <icSessionId>` |
+
+即不需要为 V2 / V3 分别登录。与第 1 节中 `USER_SESSION` Cookie 值的 header 用法一致，
+区别只是 session 值的来源从「浏览器手动提取」变为「Login API 自动获取」。
+
+`orgId` 短码与 Takeda 环境的已知对应（仅人工核对用，不作为强身份）：
+
+```text
+000LA8 → DEV
+000LVT → TEST
+000LVU → PROD
+```
+
+**认证状态码语义（实现契约）**：
+
+| 场景 | 语义 | 处理 |
+|------|------|------|
+| Login POST 401 / 403 | 凭据本身无法登录 | `InvalidCredentialsError`，不重复 retry（防账号锁定） |
+| 业务 GET 401 | session 失效 | 重新 Login → 重建 URL/Header → 重试一次；仍 401 → `AuthenticationError` |
+| 业务 GET 403 | session 有效但权限不足 | `PermissionDeniedError`，**不 refresh** |
+
+Session 为 idle timeout 模型：不解析 JWT `exp`，不做 per-request health-check；
+进程内以 `last_activity_at` + 25 分钟阈值做 proactive refresh（optimization），
+**401 才是权威失效判定**。
 
 ---
 

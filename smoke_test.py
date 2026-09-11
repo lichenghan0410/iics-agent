@@ -4,19 +4,27 @@ smoke_test.py — v0.1 只读冒烟测试（Mode A 完成标准）
 
 不启动 Cowork Agent，直接测试客户端与工具函数。
 
-运行:
-  IICS_SESSION_TOKEN="<USER_SESSION值>" python smoke_test.py
+运行（Amendment 10 主路径：username/password 自动 Login）:
+  IICS_ENV=TEST python smoke_test.py
+  前提：<repo_root>/iics_credentials.json 已由使用者填好该环境账号，且该环境已完成
+        auth-check → 人工确认 → auth-pin。
+
+Legacy（仅调试）:
+  IICS_AUTH_MODE=legacy_token IICS_SESSION_TOKEN="<USER_SESSION值>" python smoke_test.py
+
 可选环境变量覆盖:
   IICS_TEST_FOLDER     默认 JAPAN_SCRM_DI
   IICS_TEST_TASK_TYPE  默认 DSS
   IICS_TEST_TASK_NAME  默认空（空则取 list_tasks 第一个结果）
 
-不打印 / 不保存 token。Test 4/5 在目标文件夹无对应 task 时允许 SKIP。
+不打印 / 不保存 username / password / session。Test 4/5 在目标文件夹无对应 task 时允许 SKIP。
 """
 
 import os
 import sys
 
+from auth.credentials import CredentialConfig, resolve_environment_name
+from auth.pins import EnvironmentPinStore
 from iics_client import SessionManager, IICSClient, build_v2_url, build_v3_url
 from tools.query import list_tasks, get_task_detail, resolve_connection
 from tools.exporter import export_results
@@ -29,35 +37,61 @@ def main() -> int:
     except Exception:
         pass
 
-    token = os.environ.get("IICS_SESSION_TOKEN", "").strip()
-    if not token:
-        print("ERROR: IICS_SESSION_TOKEN 未设置，无法运行冒烟测试。", file=sys.stderr)
-        print("请先从浏览器获取 USER_SESSION 并 export IICS_SESSION_TOKEN。", file=sys.stderr)
-        return 1
+    legacy = os.environ.get("IICS_AUTH_MODE", "").strip().lower() in (
+        "legacy", "legacy_token", "legacy-token")
+
+    if legacy:
+        token = os.environ.get("IICS_SESSION_TOKEN", "").strip()
+        if not token:
+            print("ERROR: legacy 模式下 IICS_SESSION_TOKEN 未设置。", file=sys.stderr)
+            return 1
+        session = SessionManager.from_sso_token(token)
+        env_label = "legacy-token"
+    else:
+        cli_env = os.environ.get("IICS_ENV", "").strip()
+        if not cli_env:
+            print("ERROR: 未设置 IICS_ENV（例如 IICS_ENV=TEST）。本工具不默认 PROD。",
+                  file=sys.stderr)
+            return 1
+        config = CredentialConfig.load()
+        environment = resolve_environment_name(config, None, cli_env)
+        session = SessionManager.from_credentials(
+            environment, config.get(environment),
+            pin_store=EnvironmentPinStore.default())
+        session.ensure_valid()   # Login + environment pin guard
+        env_label = environment
 
     TEST_FOLDER = os.environ.get("IICS_TEST_FOLDER", "JAPAN_SCRM_DI")
     TEST_TYPE = os.environ.get("IICS_TEST_TASK_TYPE", "DSS")
     TEST_TASK = os.environ.get("IICS_TEST_TASK_NAME", "")
 
     # ── Test 1: SessionManager + URL factory ─────────────────────────────
-    session = SessionManager.from_sso_token(token)
-    assert session.server_url == "https://use4.dm-us.informaticacloud.com"
+    assert session.server_url.startswith("https://"), session.server_url
     assert (
-        build_v2_url(session.server_url, "dsstask/name/X")
+        build_v2_url("https://use4.dm-us.informaticacloud.com", "dsstask/name/X")
         == "https://use4.dm-us.informaticacloud.com/saas/api/v2/dsstask/name/X"
     )
     assert (
-        build_v3_url(session.server_url, "public/core/v3/objects")
+        build_v3_url("https://use4.dm-us.informaticacloud.com", "public/core/v3/objects")
         == "https://use4.dm-us.informaticacloud.com/saas/public/core/v3/objects"
     )
     assert (
         build_v2_url("https://use4.dm-us.informaticacloud.com/saas", "connection/123")
         == "https://use4.dm-us.informaticacloud.com/saas/api/v2/connection/123"
     )
-    print("✅ Test 1 passed: SessionManager + URL factory")
+    print(f"✅ Test 1 passed: SessionManager + URL factory (env={env_label})")
+
+    # ── Test 1b: 安全回归 —— 业务 client 仍然 GET-only ───────────────────
+    client = IICSClient(session)
+    try:
+        client._request("POST", "connection/1")
+    except ValueError as e:
+        assert "only supports GET" in str(e), e
+        print("✅ Test 1b passed: IICSClient 仍为 GET-only（POST 被拒绝）")
+    else:
+        raise AssertionError("SAFETY REGRESSION: _request 接受了 POST")
 
     # ── Test 2: list_tasks — all types ───────────────────────────────────
-    client = IICSClient(session)
     result = list_tasks(client, folder_path=TEST_FOLDER)
     assert "tasks" in result, f"list_tasks returned error: {result}"
     assert result["count"] >= 0

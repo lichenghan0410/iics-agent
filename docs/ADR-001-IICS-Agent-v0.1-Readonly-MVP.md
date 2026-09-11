@@ -1,6 +1,6 @@
 # ADR-001: IICS Agent · v0.1 Read-only MVP
 
-**状态**: Accepted（含 Amendment 1）
+**状态**: Accepted（含 Amendment 1–10.1；Amendment 10 认证架构修订已 ACCEPTED）
 **日期**: 2026-06-27
 **决策人**: Li（运维负责人）
 **参考文档**: `IICS_Agent_System_Design.md` v1.4（已通过三轮 review，评分 9/10）
@@ -11,6 +11,7 @@
 |------|------|
 | 2026-06-27 | Accepted — v0.1 Mode A（Claude Code CLI，主）+ Mode B（Cowork，计划辅模式）；经一轮 ADR review（评分 8.6/10）修正 V2 path 契约、Smoke Test 断言阻断项，采纳 V3 params 规范、connection 抽取 best-effort、export sheet best-effort 标注等改进；D-1 扩展为双模式设计，新增 `iics_cli.py` / `CLAUDE.md` 契约 |
 | 2026-06-29 | v0.1 Mode A 真实 `USER_SESSION` token 联调通过（Step 1–9 完成，Smoke Test 1–6 全部通过）。联调中发现 6 项契约与实测不符（V3 路径、分页机制、`q` 语法大小写、按名消歧可行性等），记录于文末「Post-ADR 实测修正」 |
+| 2026-09-11 | **Amendment 10 / 10.1 — ACCEPTED**：D-2 认证架构由「手动 `USER_SESSION`」修订为 DEV/TEST/PROD 多环境非交互式自动 Login + TOFU `orgUuid` environment pin + process-local session + 业务 401 自动 refresh once；Amendment 10.1 修复 `auth-check` stdout contract 与重复 `--env` 的隐式优先级。实现、mock 测试与真实环境验收均已完成，详见文末三节 |
 | 2026-06-30 | **Amendment 1**：① 移除 Mode B（`iics_agent.py` Cowork Interactive Agent），新增 Mode C（手动直接调用 `iics_cli.py`，零新增代码）作为辅模式，详见 D-1；② 将 2026-06-29 发现的 6 项实测偏差反向同步进 D-3 / D-4 / `tools/query.py` 契约正文及 Smoke Test 断言，消除正文与文末「Post-ADR 实测修正」附录不一致的问题 |
 
 > 说明：本次 Amendment 1 是对 v0.1 运行模式与契约准确性的修订，**不等同于进入 v0.2（Dry-run Update）**。v0.2 的范围（写操作 dry-run、`validate_update_preflight` 等）仍未启动，升级条件见文末。
@@ -45,7 +46,7 @@ v0.1 的唯一目标是：**让运维人员能用自然语言查询 IICS task �
 | D-2 | 认证架构 | `SessionManager` 双模式封装，v0.1 只启用 SSO Cookie 模式 |
 | D-3 | URL 构建 | 工厂函数模式，防止 `/saas/saas/` 路径重复 |
 | D-4 | API 版本混用策略 | V3 枚举 + V2 详情，分别注入不同 Header |
-| D-5 | v0.1 CLI 暴露边界 | 只暴露只读子命令（4 个 + Amendment 6 起新增 export-selected，共 5 个），write 代码不存在 |
+| D-5 | v0.1 CLI 暴露边界 | IICS 业务 API 只读，write 代码不存在。原始 4 个子命令，Amendment 6 起 5 个，**Amendment 10 起共 7 个**（5 个业务 / 数据命令 + `auth-check` / `auth-pin` 两个认证生命周期命令）——见 D-5「当前命令契约」 |
 
 ---
 
@@ -150,6 +151,15 @@ Mode C 无 AI 层介入，不存在 prompt injection 或模型误调用风险，
 
 > **v0.1 限制**: `from_sso_token()` 仅允许只读操作。`from_env()` 搭框架但 v0.1 不启用，不做写操作验证。
 
+> **⚠️ 已被 Amendment 10 supersede（2026-09-11）**：本节「无专用服务账号、只能手动粘贴
+> `USER_SESSION`」的前提已被实测推翻——存在可用于本工具的 non-interactive
+> `username` / `password` 凭据，`POST /ma/api/v2/user/login` 返回的同一个 `icSessionId`
+> 可同时用于 V2（`icSessionId`）与 V3（`INFA-SESSION-ID`）。当前默认认证路径为
+> **多环境自动 Login + environment identity pinning + process-local session**；
+> 手动 `USER_SESSION`（`IICS_SESSION_TOKEN`）已降级为需显式开启的 legacy 调试模式。
+> 完整决策、调用链、安全边界与验收结论见文末 **Amendment 10 / 10.1 / 最终验收结论**。
+> 以下 D-2 原文保留为历史决策记录。
+
 ---
 
 ## D-3: URL 构建
@@ -229,7 +239,7 @@ IICS 有两套 API，行为差异显著：
 
 ## D-5: v0.1 CLI 暴露边界
 
-### 决策
+### 决策（原始，2026-06-27；命令集合已由 Amendment 6 / 10 扩展，见下方「当前命令契约」）
 
 **v0.1 `iics_cli.py` 只实现只读子命令（4 个 + Amendment 6 的 `export-selected`，共 5 个），不出现任何写操作子命令或其底层 import。**
 
@@ -248,6 +258,57 @@ SUBCOMMANDS = {
 ```
 
 `tools/update.py`、`tools/batch.py`、`tools/safety.py` 在 v0.1 **不创建**，`iics_cli.py` 也不 import 它们。
+
+### 当前命令契约（Amendment 10 更新）
+
+> 上方「决策」是 2026-06-27 的原始 snapshot（当时 4 个命令，Amendment 6 起 5 个）。
+> Amendment 10 引入认证生命周期命令后，**当前 `iics_cli.py` 共 7 个 subcommands**，
+> 按对 IICS 的作用分为两类：
+
+**业务 / 数据操作命令（5 个）**
+
+```text
+list-tasks
+get-task
+resolve-connection
+export
+export-selected
+```
+
+对 IICS 严格 **GET-only**：不得发出 `POST` / `PUT` / `PATCH` / `DELETE` 业务请求。
+`IICSClient._request()` 中 `if method != "GET": raise ValueError` 是这条边界的可执行强制点。
+
+**认证生命周期管理命令（2 个，Amendment 10 新增）**
+
+| 命令 | 允许的写行为 | 对 IICS 的边界 |
+|---|---|---|
+| `auth-check` | Login `POST`（仅认证）。不写任何本地文件 | 不执行任何 IICS business write |
+| `auth-pin` | Login `POST`（仅认证）+ 本地写 `.env_pins.json` | 不执行任何 IICS business write |
+
+### 两类"写"必须区分
+
+D-5 的核心安全意图未变，但需要明确它约束的是**哪一侧**的写：
+
+```text
+IICS-side business boundary          ← D-5 的约束对象，保持 GET-only
+    禁止：POST / PUT / PATCH / DELETE 业务 API
+    禁止：update-runtime / update-connections / batch-update 等写子命令
+    禁止：tools/update.py / batch.py / safety.py
+
+authentication lifecycle exception   ← Amendment 10 引入，不改变上一条
+    允许：POST /ma/api/v2/user/login（认证层唯一 POST，只在 auth/login.py）
+
+local trust metadata write           ← Amendment 10 引入，不改变第一条
+    允许：auth-pin 写本地 .env_pins.json（org_uuid / org_id / pinned_at）
+```
+
+因此「v0.1 Read-only MVP」的准确含义是
+**「对 IICS 业务 API 只读」**，而**不是**「程序绝对不写任何本地文件」——
+`export` 早已写出 Excel / JSON 文件，`auth-pin` 写本地环境身份 metadata，
+两者都不代表放开 IICS business write。
+
+Login POST 与本地 pin write 的完整设计、异常语义与安全论证见 **Amendment 10**；
+D-5 只保留边界分类，不重复实现细节。
 
 ### 取舍
 
@@ -1050,10 +1111,13 @@ DSS/WORKFLOW route、workbook 结构（`Task Summary` + `Export Errors`，不新
 
 ## Amendment 5 — WORKFLOW Child Task Export
 
-> **⚠️ 部分已被 Amendment 8 supersede**：本节步骤 3/4 的 WORKFLOW **9 列（含 `folder`，取自
-> export 的 `folder_path`）** 已改为 **8 列（去 `folder`）**——`build_workflow_summary_rows(rec)`
-> 去 `folder_path` 参数与父 `folder` 字段。WORKFLOW child 展开 / count / route / get-task 均不变。
-> 以 Amendment 8 为准。
+> **⚠️ 本节的 WORKFLOW 导出列结构已被后续 Amendment supersede**：本节步骤 3/4 描述的
+> WORKFLOW 列（含取自 export `folder_path` 的 `folder` 列）先由 Amendment 8 去掉 `folder`
+> 列（`build_workflow_summary_rows(rec)` 去 `folder_path` 参数与父 `folder` 字段），
+> 随后又被 **Amendment 9** 再次调整。
+> **当前 authoritative 的 WORKFLOW 导出 schema 以 Amendment 9 为准**——本横幅不重复维护列数，
+> 以免 schema 再变时多处失同步。
+> WORKFLOW child 展开 / count / detail route / get-task 行为自本节起未变。
 
 **性质**：v0.1 只读边界内的改进，仅针对 `export <FOLDER> --type WORKFLOW --format excel`。
 MTT / DSS 的查询与导出契约、WORKFLOW 的 `get-task` 与 detail route 均不变。
@@ -1170,9 +1234,11 @@ Amendment 3/4 正文「DSS / WORKFLOW：1 task = 1 行」仅适用于**通用列
 
 ## Amendment 7 — DSS Dedicated Export Schema
 
-> **⚠️ 部分已被 Amendment 8 supersede**：本节所有 `Workflow Tasks(9)` / `WORKFLOW 9 列` 均改为
-> **8 列（去 folder）**（ALL 顺序变为 `MTT Task`(22) → `DSS Tasks`(11) → `Workflow Tasks`(8) →
-> `Export Errors`）。DSS 11 列 schema 本身不变。以 Amendment 8 为准。
+> **⚠️ 本节引用的 WORKFLOW 列数已被后续 Amendment supersede**：本节写作时 WORKFLOW 为
+> 9 列（含 `folder`），随后由 Amendment 8 去掉 `folder` 列、再由 **Amendment 9** 再次调整。
+> **当前 authoritative 的三张业务 sheet schema（含 ALL 的 sheet 顺序与各自列数）以
+> Amendment 9 为准**——本横幅不重复维护列数。
+> 本节确立的「DSS 脱离 MTT schema、使用独立 DSS_HEADERS」这一决策本身未被推翻。
 
 **性质**：export/schema + CLI presentation change，**不改查询层**。不新增 API、不新增写操作、
 不改 DSS detail route。
@@ -1401,9 +1467,547 @@ ordinary export 复用(单次 discovery)、selected 三类型 folder required、
 id=classic/FRS ID=discovered、ALL 顺序、WORKFLOW child 2→2/0→1 每行重复 id+FRS ID、无 lookup/export、
 无 dsstask/{frs}·workflow/{frs}。
 
-### 列数订正（顺手）
+### 列数订正 —— 当前 authoritative Excel schema（单一权威来源）
 
-Amendment 8 后文档基线曾滞后（WORKFLOW 8）。Amendment 9 完成后正式值：**MTT 23 / DSS 12 /
-WORKFLOW 9**。
+Amendment 8 后文档基线曾滞后（WORKFLOW 8）。**自 Amendment 9 起，本小节是三张业务 sheet
+列数的唯一权威来源**，Amendment 5 / 7 / 8 中的列数均为各自当时的历史快照：
+
+| 业务 sheet | 当前列数 |
+|---|---|
+| `MTT Task` | **23**（22 + `FRS ID`） |
+| `DSS Tasks` | **12**（11 + `FRS ID`） |
+| `Workflow Tasks` | **9**（8 + `FRS ID`，在 `id` 之后插入；与 Amendment 5 时代含 `folder` 的 9 列不是同一组列） |
+
+`--type ALL` 的 sheet 顺序：`MTT Task` → `DSS Tasks` → `Workflow Tasks` → `Export Errors`。
 
 *相关提交：本次（`feat: expose FRS IDs across task queries and exports`）。*
+
+---
+
+## Amendment 10 — Multi-Environment Non-Interactive Authentication (D-2 更新)
+
+**日期**：2026-09-11
+**状态**：**ACCEPTED**（实现 + 真实环境验收均已完成；不推翻 ADR-001 正文，作为 D-2 认证决策的修订）
+**范围**：仅认证 / 环境层。业务 API 仍严格 GET-only，v0.1 只读边界不变。
+**最终验收结论**：见文末「Amendment 10 — 最终验收结论」。
+
+### 原前提（ADR-001 D-2）
+
+```text
+企业 SSO（Okta）
+无专用 service-style credential
+只能由运维人员手动从浏览器提取 USER_SESSION
+IICS_SESSION_TOKEN 为唯一认证入口
+```
+
+### 新实测事实（Postman 验证，本 Amendment 的既定前提）
+
+```text
+POST https://dm-us.informaticacloud.com/ma/api/v2/user/login
+     body: {"username": ..., "password": ...}
+        ↓
+返回 serverUrl + icSessionId（以及 orgId / orgUuid）
+        ↓
+同一个 icSessionId：
+  V2 → icSessionId header
+  V3 → INFA-SESSION-ID header
+        ↓
+V2 / V3 API 均 200
+```
+
+因此：**存在可用于 non-interactive 登录的 username/password 凭据**，
+「只能手动 USER_SESSION」这一前提被推翻。V2 Login 与 V3 public API 共用同一 session，
+不需要两套登录。
+
+### 新方向（D-2 修订）
+
+```text
+multi-environment credential config
++ automatic Login
++ TOFU orgUuid pin
++ process-local session（不落盘）
++ 业务 401 自动 refresh once
+```
+
+### 决策要点（索引）
+
+每条决策的完整展开见其后对应小节，此处仅列结论，避免重复陈述。
+
+| # | 决策 | 详见 |
+|---|---|---|
+| 1 | **环境参数化**：`--env` → `IICS_ENV` → `MissingEnvironmentError`，永不默认 PROD，不猜测环境 | Environment selection 契约 |
+| 2 | **Credential 所有权分离**：空值模板进 git，真实值 local-only 由使用者本人维护 | Credential 边界 |
+| 3 | **Login URL 三级解析**：env override → 顶层 → `DEFAULT_LOGIN_URL`，三环境不重复配置 | Credential 边界 |
+| 4 | **Login POST 隔离**：认证层唯一 POST，业务 `IICSClient` 仍严格 GET-only | 最终认证调用链 |
+| 5 | **Login 响应最小化持有**：只保留 `icSessionId`/`serverUrl`/`orgId`/`orgUuid`/`id`，原始 response 不落任何长期对象 | Login 响应最小化持有 |
+| 6 | **session = process-local**：不落盘、无 session cache；25 分钟 idle 主动刷新只是优化，401 才是权威失效信号 | SessionManager 与 session 生命周期 |
+| 7 | **Environment Pin（TOFU + 人工确认）**：`orgUuid` 为唯一强身份；未 pin 或不匹配即阻断业务 API，禁止静默覆盖 | Environment identity 与 TOFU pin |
+| 8 | **401 / 403 语义分离**：业务 401 → refresh once + 重建 URL/Header + retry once；403 不 refresh | 401 / 403 与重试策略 |
+| 9 | **重试计数分离**：认证 refresh ≤1，与业务 / Login 的 transient retry 各自独立计数 | 401 / 403 与重试策略 |
+| 10 | **不实现**：`SessionState` enum / 状态机、跨进程 session cache、JWT `exp` 解析、per-request health-check、业务写 API、`IICSClient` 的 POST 能力 | — |
+
+### 代码结构
+
+```text
+auth/errors.py       认证 / 环境异常语义
+auth/credentials.py  credential config loader + 环境名解析
+auth/login.py        Login POST（认证层唯一 POST）+ LoginIdentity 最小对象
+auth/pins.py         EnvironmentPinStore（原子写：temp → fsync → os.replace）
+
+iics_client.py       SessionManager（environment-aware，login/ensure_valid/
+                     refresh/invalidate/headers_v2/headers_v3）
+                     IICSClient._request（GET-only；每 attempt 重建 URL+Header）
+
+iics_cli.py          全局 --env；auth-check / auth-pin；create_client(args)
+
+tools/query.py / exporter.py / selected_exporter.py
+                     零认证改动（只面向 IICSClient）
+```
+
+### 最终认证调用链
+
+```text
+--env DEV / TEST / PROD            （或 IICS_ENV；都没有 → MissingEnvironmentError）
+        ↓
+Environment Resolver               （alias → 规范键；不默认 PROD，不猜测）
+        ↓
+Credential Config                  （IICS_CONFIG_FILE → <repo_root>/iics_credentials.json）
+        ↓
+SessionManager.from_credentials()
+        ↓
+Login POST                         （认证层唯一 POST：/ma/api/v2/user/login）
+        ↓
+serverUrl + icSessionId + orgId + orgUuid      （其余响应字段读取后即丢弃）
+        ↓
+Environment Pin Guard              （未 pin / orgUuid 不符 → 阻断，且不保存 session）
+        ↓
+IICSClient
+        ↓
+GET-only business APIs
+        ├─ V2 → icSessionId
+        └─ V3 → INFA-SESSION-ID    （同一个 Login session）
+```
+
+**Login POST ≠ 开放业务 POST。** Login 的 `requests.post` 只存在于 `auth/login.py`；
+`IICSClient._request()` 中的 `if method != "GET": raise ValueError` 是必须保留的安全回归点，
+业务层不存在任何写路径。
+
+### Environment selection 契约
+
+```text
+CLI --env  →  IICS_ENV  →  MissingEnvironmentError
+```
+
+- **永不默认 PROD**；不由 folder 名 / username / serverUrl / org 名推断环境
+- canonical environments：`DEV` / `TEST` / `PROD`；alias 由 credential config 的
+  `aliases` 字段管理（例如 `test` / `testing` / `テスト` / `テスト環境` → `TEST`），
+  不在代码中硬编码
+- 未知环境名 → `UnknownEnvironmentError`
+- `--env` 可放在子命令前或后，但**每条命令只允许出现一次**（Amendment 10.1，见下节）
+- `IICS_ENV=DEV` + 一个 CLI `--env TEST` → 使用 `TEST`。环境变量被 CLI 覆盖是既有优先级
+  设计，**不算重复**
+
+### Credential 边界
+
+| 文件 | 进 Git | 内容 | 维护者 |
+|---|---|---|---|
+| `iics_credentials.template.json` | ✅ | 仅键名与 schema；`username` / `password` **永远为空字符串** | 可由工具维护 |
+| `iics_credentials.json` | ❌ local-only / git ignored | 三个环境的真实 `username` / `password` | **使用者本人** |
+
+配置路径解析：`IICS_CONFIG_FILE`（可选 override，仓库外部署用）→
+默认 `<repo_root>/iics_credentials.json`。
+
+Login URL 解析：`environment.login_url` → 顶层 `login_url` → 代码 `DEFAULT_LOGIN_URL`。
+三个环境正常共用顶层值，**不重复配置**；env 级字段仅为未来特殊环境保留。
+
+`username` / `password` 为空字符串视为该环境**未配置** → `MissingCredentialsError`，
+不会拿空串去尝试 Login。
+
+**Agent 行为红线**（同步写入 `CLAUDE.md` 与 `SKILL.md`）：Agent 不得生成真实 credential、
+不得填写或修改真实 `username` / `password`、不得读取 `iics_credentials.json` 正文、
+不得输出 credential 或 session。
+
+### Login 响应最小化持有
+
+Login 成功后只允许提取并长期持有：
+
+```text
+icSessionId   serverUrl   orgId   orgUuid   id
+```
+
+（`id` 仅作排障时的账号标识，且不进入任何 CLI 输出。）
+
+原始 Login response **不得**挂载到 `SessionManager`、不得打印、不得落盘、
+不得进入异常信息、不得进入 CLI stdout。实测该响应还包含
+`roles` / `usergroups`（含内部维护人邮箱）/ `emails` / `securityQuestion` /
+`securityAnswer` / `password`（IICS 已脱敏），这些字段读取后即丢弃、一律不透传。
+异常只描述结构性问题（"响应不是合法 JSON"、"缺少字段 icSessionId"），不含字段取值。
+
+`session_id`（即 `icSessionId`）运行时必须使用，但**不得**出现在 CLI 输出、日志、
+异常或任何持久化文件中。
+
+### SessionManager 与 session 生命周期
+
+`SessionManager` 是环境感知的进程内会话持有者，概念能力：
+`login()` / `ensure_valid()` / `refresh()` / `invalidate()` / `touch()` /
+`can_refresh()` / `headers_v2()` / `headers_v3()`。
+未实现显式 `SessionState` enum 或状态机——单进程一次性 CLI 模型下，字段本身即状态。
+
+```text
+CLI 进程启动
+    ↓
+Login（一次）
+    ↓
+同一进程内所有业务 GET 复用同一 session
+    ↓
+失效时自动重新登录（见下节）
+    ↓
+进程退出 → session 丢弃
+```
+
+**session = process-local。** 不实现 session cache 文件、不做跨进程 token 持久化。
+下一条 CLI 命令重新 Login。
+
+proactive refresh 是**优化**而非判定依据：以 `last_activity_at` +
+`IDLE_REFRESH_SECONDS = 25 * 60` 触发主动刷新。**真正权威的失效信号是业务 API 401。**
+不解析 JWT `exp`（即使 `icSessionId` 形似 JWT 也不作为程序契约），
+不在每次业务 GET 前发 health-check。
+
+### Environment identity 与 TOFU pin
+
+**为什么不能首次 Login 后静默自动 pin：**
+
+```text
+TEST 槽位里误填了 PROD 的 credential
+        ↓
+Login 成功（凭据本身有效）
+        ↓
+若程序静默 pin
+        ↓
+PROD 的 orgUuid 被永久绑定为 "TEST"
+```
+
+因此采用 TOFU + explicit confirmation：
+
+```text
+auth-check --env <ENV>
+        ↓
+展示非敏感身份（org_id / org_uuid / server_host），不写任何 pin
+        ↓
+【使用者本人人工确认这确实是目标环境】   ← Agent 不得代为确认
+        ↓
+auth-pin --env <ENV>
+        ↓
+原子写入 .env_pins.json
+```
+
+运行期 guard：未 pin → `EnvironmentPinRequiredError`；Login 的 `orgUuid` 与已 pin 值不符
+→ `EnvironmentMismatchError`。两种情况都**阻断一切业务 API，且不保存 session**。
+
+**身份强度**：
+
+| 字段 | 角色 |
+|---|---|
+| `orgUuid` | **唯一强身份**，pin 校验以它为准 |
+| `orgId` | 短码，仅供人工 sanity check（`000LA8` → DEV，`000LVT` → TEST，`000LVU` → PROD） |
+| `serverUrl` / server host / `username` | **不得**作为环境身份；`serverUrl` 每次以当前 Login 响应为准，不持久化 |
+
+实测 Login 响应中不存在 `orgName` 等 org 显示名字段。
+
+**`.env_pins.json` 产品选择**：local-only、git ignored、**不随仓库共享**——每个使用者
+在自己机器上独立完成 `auth-check` → 人工确认 → `auth-pin`。
+entry 只包含 `org_uuid` / `org_id` / `pinned_at`，不含 credential、不含 `icSessionId`、
+不含 `serverUrl`。
+
+**写入安全**：原子写（temp file → flush/fsync/close → `os.replace()`），避免进程中断
+留下半截 JSON。已有 pin 与本次 Login 的 `orgUuid` 不一致时**不得自动覆盖**；
+重新绑定必须由使用者显式执行（`auth-pin --force`）。相同 `orgUuid` 的重复 pin 为幂等，
+不重写。
+
+### 401 / 403 与重试策略
+
+**业务 GET 401**（权威失效信号）：
+
+```text
+GET（旧 URL / 旧 session）
+    ↓ 401
+invalidate
+    ↓
+Login
+    ↓
+得到新的 serverUrl + session_id
+    ↓
+重新 build URL（不能只换 Header 而沿用旧 URL）
+    ↓
+重新 build Header
+    ↓
+retry 原 GET 一次
+    ↓ 仍 401
+AuthenticationError
+```
+
+认证 refresh 最多 **1 次**，不存在 `login → retry → login → retry` 的循环。
+
+**业务 GET 403**：session 有效但权限不足 → `PermissionDeniedError`，**不 refresh**。
+看到 403 就重新登录是错误行为。
+
+**Login 失败 ≠ 业务 session 失败**（重要排障契约）：
+
+| 场景 | 异常 | 行为 |
+|---|---|---|
+| **Login POST** 返回 401 / 403 | `InvalidCredentialsError` | 账号本身无法登录，**不重复 retry**（避免锁号） |
+| **业务 GET** 401 → refresh → retry → 仍 401 | `AuthenticationError` | 会话在重新登录后仍无效 |
+
+**Login transient retry**：`Timeout` / `ConnectionError` / `429` / `502` / `503` / `504`
+→ 最多 3 次总尝试，backoff 1s / 2s。
+`400` / `401` / `403` 及其它非 transient 4xx **不做重复 credential Login**。
+
+**重试计数分离**：认证 refresh（≤1）、业务 transient retry（≤3 次总尝试）、
+Login 自身 transient retry（≤3 次）三者使用彼此独立的计数器，互不消耗预算。
+
+### 异常语义
+
+全部位于 `auth/errors.py`，共同基类 `IICSAuthError`：
+
+| 异常 | 触发条件 |
+|---|---|
+| `MissingEnvironmentError` | 无 `--env` 且无 `IICS_ENV` |
+| `UnknownEnvironmentError` | 环境名 / alias 不在 credential config 中 |
+| `DuplicateEnvironmentArgumentError` | 同一条命令出现多个 `--env`（Amendment 10.1） |
+| `CredentialConfigError` | 配置文件缺失 / 不可读 / JSON 非法 / schema 不合法 |
+| `MissingCredentialsError` | 该环境 `username` 或 `password` 为空字符串（`CredentialConfigError` 子类） |
+| `InvalidCredentialsError` | **Login POST** 返回 401 / 403 |
+| `InvalidLoginResponseError` | 非 JSON / HTML / 缺 `icSessionId`·`serverUrl`·`orgUuid`·`orgId` / 其它 4xx |
+| `EnvironmentPinRequiredError` | 该环境尚未 pin |
+| `EnvironmentMismatchError` | Login `orgUuid` 与已 pin 值不一致，或试图静默覆盖 pin |
+| `PermissionDeniedError` | **业务 GET** 返回 403 |
+| `AuthenticationError` | 业务 GET refresh 后仍 401；或无 session 且无法 refresh |
+
+### Git / secret 安全边界
+
+```text
+.gitignore 精确排除（不使用会误伤 template 的宽泛规则）：
+    /iics_credentials.json
+    /.env_pins.json
+```
+
+Accepted 时的实测状态：credential tracked = **no**，pin tracked = **no**，
+`iics_credentials.template.json` 仍可被 git 跟踪。
+
+额外 guard：`scripts/check_no_real_credentials.py`——无第三方依赖，只检查暂存区**路径**，
+不读取文件内容；可选安装为本地 `pre-commit` hook，但 `.gitignore` 与提交前的 git 自检
+才是主要防线。
+
+文档与测试中一律不出现真实 credential、真实 session 或真实 `orgUuid`；
+需要举例时使用 `<ORG_UUID>` 占位。
+
+### 自动化验证覆盖
+
+mock 单元测试全部不触网、不使用真实账号密码、不读写真实 `.env_pins.json`
+（通过 `IICS_CONFIG_FILE` / `IICS_PIN_FILE` 指向临时目录隔离）。覆盖领域：
+
+- environment resolution（`--env` 优先于 `IICS_ENV`、alias 含日文、缺失 fail closed、未知环境）
+- credential validation（缺文件 / 非法 JSON / 缺环境 / 空 username / 空 password /
+  顶层与 env 级 login_url / 默认 login_url / repr 脱敏）
+- Login（字段提取、POST body、200+HTML、缺 `icSessionId`·`serverUrl`·`orgUuid`、异常无 secret）
+- Login transient retry（`Timeout`、`ConnectionError`、`429`、`502`、`503`、`504`、
+  retry exhausted、`400`/`401`/`403`/`404` 不重试且请求数为 1、transient 常量未被改动）
+- environment pinning（未 pin 阻断且不保存 session、正确 pin 放行、orgUuid mismatch、
+  不自动覆盖、幂等、`--force` 重绑、pin 记录字段白名单、原子写无残留 temp）
+- `auth-check` / `auth-pin` stdout contract（各 status 的 exact key set、禁止字段阻断、
+  未登记 status fail closed、人工提示在 stderr）
+- duplicate `--env`（前置 / 后置 / 不同值 / 相同值 / `--env=` 形式 /
+  `IICS_ENV` 叠加不算重复 / 重复在读取 credential 与 Login 之前就失败）
+- V2 / V3 header 注入与同一 session 复用
+- 业务 401 refresh once + retry（含 refresh 后必须使用新 `serverUrl`）、二次 401 →
+  `AuthenticationError`、legacy 模式不 refresh、认证与瞬时计数分离、idle 主动 refresh
+- 403 不 refresh
+- **GET-only safety regression**：`POST` / `PUT` / `PATCH` / `DELETE` 全部被拒且不发 HTTP
+- secret minimization：`SessionManager` 不持有原始 Login 响应、pin 文件无 secret/session、
+  `public_identity()` 不含 `id`、仓库内无 session cache 文件
+
+最终数量见文末「Amendment 10 — 最终验收结论」。
+
+### 对正文旧契约的反向修正（supersede）
+
+- 正文「`IICS_SESSION_TOKEN` 为唯一认证入口」→ 改为 legacy/debug 模式，
+  需显式 `IICS_AUTH_MODE=legacy_token` 开启，不受环境 pin 保护。
+- 正文 `SessionManager.from_env()` 语义「不调用 login API」→ 仅对 legacy 路径成立；
+  主路径 `from_credentials()` 会调用 Login。
+- `SessionManager.sso_token` 保留为 `session_id` 的向后兼容别名。
+- Step 4 契约「401 → `handle_401()` 直接抛 RuntimeError」→ 主路径改为
+  refresh once + retry；legacy 路径保持原 RuntimeError 语义。
+- 正文「实现契约」中嵌入的 v0.1 期 `CLAUDE.md` / `iics_cli.py` 快照（`export
+  IICS_SESSION_TOKEN="<USER_SESSION 值>"`、`iics_client.py` 契约里的
+  `SessionManager(sso_token/username/password)`）→ 保留为历史契约记录；当前实际契约
+  以本 Amendment 及仓库中的 `CLAUDE.md` 为准。
+- 正文 Consequences「SSO Token 过期后必须手动刷新（无法自动续期）」与「`server_url`
+  默认写死」→ 主路径下 session 由 Login API 自动获取并在 401 时自动重新登录，
+  `server_url` 每次取自 Login 响应。
+- **D-5 命令集合**：由 5 个扩展为 7 个（新增 `auth-check` / `auth-pin`）。这两个命令的
+  Login `POST` 与 `auth-pin` 的本地 `.env_pins.json` 写入，**不改变 D-5 的 IICS business
+  GET-only 边界**；D-5「当前命令契约」已同步，其分类以本 Amendment 为设计依据。
+
+### 未改动（回归保证）
+
+- `build_v2_url` / `build_v3_url` 行为不变
+- `IICSClient._request` 仍然只接受 GET（必测安全回归）
+- `tools/query.py` / `tools/exporter.py` 零改动
+- `tools/selected_exporter.py` 仅把 session 失败告警的 error_type 从
+  `"RuntimeError"` 扩展为 `{"RuntimeError", "AuthenticationError"}`。
+  理由：Amendment 6 §9 的「连续 ≥5 次同类 session 失败 → 追加告警」原按 `RuntimeError`
+  识别，而主路径的会话失效语义已变为 `AuthenticationError`；不扩展则该告警在新认证路径下
+  永不触发（静默回归）。仅扩展识别集合，告警文案、abort 行为、计数与输出结构均不变
+- Excel / JSON schema、列数、counts 语义（`task_count` / `rows` /
+  `failed_details_count` / `enrichment_warnings_count`）全部不变
+
+### 已验证
+
+- mock 单元测试全通过，不触网、不使用真实账号密码（最终 87 项，见文末最终验收结论）
+- `git check-ignore` 确认 `/iics_credentials.json` 被忽略，模板仍可被 git 跟踪
+- 三个环境的 `auth-check` → 人工核对 org 身份 → `auth-pin` 均已由使用者本人完成
+- TEST 环境完成真实业务只读回归（详见文末「Amendment 10 — 最终验收结论」）
+
+---
+
+## Amendment 10.1 — auth-check / auth-pin stdout contract 与重复 `--env` fail closed
+
+**日期**：2026-09-11
+**状态**：Accepted（Amendment 10 的缺陷修复，不改变其架构决策）
+**触发**：真实环境 TEST `auth-check` 验收期间发现两处契约缺陷。
+
+### 缺陷 1 — `auth-check` stdout 混入人类提示字段
+
+`status = pin_required` 时 stdout 多出 `next_step`（固定人类操作提示，不含敏感信息），
+违反 machine-readable stdout contract。
+
+**决策**：认证 / 环境初始化命令的 stdout 按 **status-specific allowlist** 投影输出，
+人类提示改走 stderr，维持 `stdout = data / stderr = diagnostics` 的 CLI contract。
+
+| 命令 / status | stdout 顶层 key |
+|---|---|
+| `auth-check` / `pin_required` | `environment` `status` `org_id` `org_uuid` `server_host`（恰好 5 个） |
+| `auth-check` / `pinned` | 上述 5 个 + `pinned_at` |
+| `auth-check` / `pin_mismatch` | 上述 5 个 + `pinned_org_uuid` `error_type` `error` |
+| `auth-pin` / `pinned`、`already_pinned` | `environment` `status` `org_id` `org_uuid` `server_host` `pinned_at` `pin_file` |
+| 顶层 fatal error（含 `auth-pin` mismatch 拒绝） | `error` `error_type` |
+
+实现为 `iics_cli._project_auth_stdout()`：未登记的 status → `ValueError` fail closed；
+结果 dict 中出现禁止字段（`username` / `password` / `icSessionId` / `session_id` /
+`id` / `roles` / `usergroups` / `emails` / `securityQuestion` / `securityAnswer` /
+`raw` / `headers` / `Authorization` 等）→ 阻断输出且只报 key 名、不回显取值。
+这是 §13.1「Login 响应体最小化持有」在 CLI 输出侧的可执行兜底。
+
+`auth-pin` 经字段级审查：原实现已符合最小化原则，无 `next_step` 类多余字段，
+本次仅补上 allowlist 强制与对应测试，未修改其输出字段。
+
+### 缺陷 2 — 重复 `--env` 静默采用后一个值
+
+`python iics_cli.py --env DEV auth-check --env TEST` 原先静默使用 `TEST`
+（argparse 子命令级参数覆盖全局级）。在 DEV/TEST/PROD 并存的多环境工具中，
+这是不可接受的隐式优先级。
+
+**决策**：一条 invocation 中 `--env` 只允许出现一次，重复即 fail closed。
+
+- 前置（`--env TEST auth-check`）与后置（`auth-check --env TEST`）均继续支持
+- 重复出现（含 `--env=VALUE` 形式、含两次取值相同）→
+  `DuplicateEnvironmentArgumentError`、退出码 1
+- 检查在 `parse_args` **之前**执行，因此在读取 credential / 发起 Login 之前就失败
+- **不**实现 first-wins / last-wins
+- `IICS_ENV` + 一个 CLI `--env` 不算重复：CLI 覆盖环境变量是 Amendment 10 的既有
+  优先级设计，保持不变
+
+行为矩阵：
+
+| 调用形式 | 结果 |
+|---|---|
+| `--env TEST auth-check`（前置） | ✅ 解析为 TEST |
+| `auth-check --env TEST`（后置） | ✅ 解析为 TEST |
+| `--env DEV auth-check --env TEST` | ❌ `DuplicateEnvironmentArgumentError`、exit 1 |
+| `--env TEST auth-check --env TEST`（同值） | ❌ 同样拒绝 |
+| `--env=DEV … --env=TEST` | ❌ 同样拒绝 |
+| `IICS_ENV=DEV` + `--env TEST` | ✅ 使用 TEST（既有优先级，不算重复） |
+| 仅 `IICS_ENV=DEV` | ✅ 使用 DEV |
+
+### 未改动（回归保证）
+
+- Login transient retry policy 不变（Timeout / ConnectionError / 429 / 502 / 503 /
+  504，最多 3 次总尝试，backoff 1s/2s；400/401/403 绝不重试）—— 本轮只补测试
+- proactive refresh（`IDLE_REFRESH_SECONDS = 25 * 60`）、业务 401 refresh once、
+  403 不 refresh、`IICSClient` GET-only、environment pin 模型、credential schema
+  全部不变
+- `tools/query.py` / `exporter.py` / `selected_exporter.py` 本轮零改动
+
+### 已验证
+
+87 项 mock 单元测试全通过（其中 Login transient retry 与 CLI contract 为本次补充），
+不触网、不读取真实 credential、不写真实 `.env_pins.json`。
+
+---
+
+## Amendment 10 — 最终验收结论
+
+**日期**：2026-09-11
+**状态**：
+
+```text
+Amendment 10 = ACCEPTED
+```
+
+涵盖 Amendment 10 与其缺陷修复 Amendment 10.1。认证架构、安全边界与 CLI 契约自本节起
+视为已收口，不再有 pending 项。
+
+### 自动化测试
+
+```text
+87 / 87 PASS
+```
+
+Login transient retry 覆盖**已完整补充**，包含：
+`Timeout` / `ConnectionError` / `429` / `502` / `503` / `504` / retry exhausted /
+`400` no retry / `401` no retry / `403` no retry。
+任何仍声称这些用例缺失的描述均为过期信息。
+
+### 环境验收矩阵
+
+| 环境 | 结论 | 已验证内容 | 未执行项 |
+|---|---|---|---|
+| **TEST** | `FULL REAL PATH PASS` | automatic Login；`auth-check`；人工 identity confirmation；未 pin 时 fail closed（`EnvironmentPinRequiredError`，Login 1 次、business GET 0 次）；`auth-pin`；V3 真实业务 GET（`list-tasks JAPAN_SCRM_DI DSS` → 921 tasks）；V2 真实业务 GET（`get-task` 成功）；same-session 互通（同一进程 Login 1 次，V3 用 `INFA-SESSION-ID`、V2 用 `icSessionId`，共用同一 Login session）；query/export 回归（`export-selected` 2 DSS success / 0 failure）；credential & session 泄漏扫描 PASS | — |
+| **DEV** | `ENVIRONMENT ONBOARDING PASS` | Login；人工 identity confirmation；`auth-pin`；pin preservation；pin guard；credential & session 泄漏扫描 PASS | 真实 business GET 未执行 —— 无已确认存在且安全的 DEV folder |
+| **PROD** | `ENVIRONMENT ONBOARDING PASS` | Login；人工 identity confirmation；`auth-pin`；pin preservation；pin guard；credential & session 泄漏扫描 PASS | 真实 business GET 未执行 —— 无已确认存在且安全的 PROD folder |
+
+DEV / PROD 未执行 business GET 属于 **test coverage difference**，不是 Amendment 10 的
+defect 或 blocker。**不得**将 DEV / PROD 记述为已完成 V2/V3 business API 验证。
+
+### Environment Pin 最终状态
+
+```text
+TEST → pin present
+DEV  → pin present
+PROD → pin present
+```
+
+三个 environment identity 均由使用者**分别人工确认**后绑定。
+
+`.env_pins.json`：local-only、not tracked、git ignored；每条 entry 只包含
+`org_uuid` / `org_id` / `pinned_at`。真实 `org_uuid` 不出现在任何文档中，
+需要举例时一律使用 `<ORG_UUID>` 占位。
+
+### Credential 最终状态
+
+`iics_credentials.json`：local-only、not tracked、git ignored；不得读取正文、
+修改正文、输出正文或加入 Git。
+`iics_credentials.template.json`：继续进入 Git，`username` / `password` 保持空字符串。
+
+### Security Boundary 最终状态
+
+```text
+Business API        = GET-only
+唯一允许的 POST      = IICS Login API（认证层）
+session             = process-local，不落盘
+credential          = local-only，不进入 Git
+pin                 = local-only，不进入 Git
+V2 / V3             = 共享同一个 Login session
+业务 401             = refresh once → rebuild URL/Header → retry once
+业务 403             = 不 refresh（PermissionDeniedError）
+```

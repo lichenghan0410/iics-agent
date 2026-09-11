@@ -226,6 +226,10 @@ def _process_type(client, ttype, tuples, failures, output_dir, ts):
             "enrichment_warnings_count": enrich, "file_path": file_path}
 
 
+# Amendment 10：认证失败语义从 RuntimeError 扩展到 AuthenticationError
+_SESSION_ERROR_TYPES = frozenset({"RuntimeError", "AuthenticationError"})
+
+
 def _session_warnings(failures):
     """§21.1：连续 >=5 次相同 session/401 相关 error_type → 追加提示（不 abort）。"""
     run_type = None
@@ -242,7 +246,7 @@ def _session_warnings(failures):
         if run > max_run:
             max_run = run
             max_type = et
-    if max_run >= _SESSION_RUN_THRESHOLD and max_type == "RuntimeError":
+    if max_run >= _SESSION_RUN_THRESHOLD and max_type in _SESSION_ERROR_TYPES:
         return ["Multiple consecutive failures with the same error type were "
                 "detected; this may indicate an expired session token rather than "
                 "per-task issues."]

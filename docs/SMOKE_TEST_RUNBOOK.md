@@ -1,11 +1,16 @@
-# IICS Agent v0.1 — 真实 Token 冒烟测试运行手册（Mode A / Claude Code CLI；含 Mode C 手动执行）
+# IICS Agent v0.1 — 冒烟测试运行手册（Mode A / Claude Code CLI；含 Mode C 手动执行）
 
-本手册定义 IICS Agent v0.1 Read-only MVP 的**验收级冒烟测试**：在 Windows 上用真实
-`IICS_SESSION_TOKEN` 通过 Claude Code CLI 驱动，验证 `iics_cli.py` 四个只读子命令与
-`smoke_test.py` 的 Test 1–6 全部通过。
+本手册定义 IICS Agent v0.1 Read-only MVP 的**验收级冒烟测试**：在 Windows 上选定环境
+（`--env` / `IICS_ENV`）并由工具自动 Login，通过 Claude Code CLI 驱动，验证 `iics_cli.py`
+的业务 / 数据子命令（对 IICS 严格 GET-only）与认证生命周期子命令
+（`auth-check` / `auth-pin`），以及 `smoke_test.py` 的 Test 1–6 全部通过。
 
-> 适用范围：`use4.dm-us.informaticacloud.com`（Takeda Prod Org），三个文件夹
-> `JAPAN_COMMERCIAL_DWH` / `JAPAN_SCRM_BAU` / `JAPAN_SCRM_DI`，task 类型 DSS / MTT / WORKFLOW。
+> 认证方式：Amendment 10 起为多环境 username/password 自动 Login + environment pin
+> （见 §3）。手动 `IICS_SESSION_TOKEN` 已降级为需显式开启的 legacy 调试模式（§3.3）。
+
+> 适用范围：`use4.dm-us.informaticacloud.com`（Takeda pod，DEV / TEST / PROD org 共用同一 host），
+> 三个文件夹 `JAPAN_COMMERCIAL_DWH` / `JAPAN_SCRM_BAU` / `JAPAN_SCRM_DI`，
+> task 类型 DSS / MTT / WORKFLOW。
 
 ---
 
@@ -58,20 +63,127 @@ v0.1 的自动化测试分两层，本手册覆盖**集成层（真实 API 冒�
 
 ---
 
-## 3. 获取真实 Session Token（不落盘、不进 git）
+## 3. 认证准备（Amendment 10：多环境自动 Login）
 
-1. 浏览器 SSO 登录 IICS Web UI，完成 Okta 验证。
-2. 打开 DevTools → Network 面板，点任意 IICS 请求，在请求头 `Cookie` 中找
-   `USER_SESSION=<value>`，复制 `<value>`。
-3. **仅在当前 PowerShell 会话内**设置环境变量（不要写进 `.env`、不要 commit）：
+### 3.0 mock 单元测试（不需要任何真实账号，先跑这个）
 
-   ```powershell
-   $env:IICS_SESSION_TOKEN = "<USER_SESSION 值>"
-   ```
+```powershell
+Set-Location -LiteralPath "D:\IICS Agent"
+python -m unittest discover -s tests -t .
+```
 
-> 安全要求：token 只存在于进程环境变量中。本项目代码不打印、不写文件、不入库
-> （`.gitignore` 已排除 `.env`、`*.xlsx`、`*.jsonl`）。Token 过期后 API 返回 401，
-> `handle_401()` 会提示重新从浏览器获取并重新 `export`。
+全部通过才继续。该套件完全 mock，不触网、不使用真实账号密码，覆盖环境解析、
+credential config、Login、environment pin、401 refresh、403 不 refresh，
+以及 **GET-only 安全回归**。
+
+### 3.1 填写 credential 配置（只能由使用者本人完成）
+
+```powershell
+Copy-Item .\iics_credentials.template.json .\iics_credentials.json   # 若尚不存在
+notepad .\iics_credentials.json                                      # 手工填入 username / password
+```
+
+要求：
+
+- `iics_credentials.template.json` 进 git，`username` / `password` 永远是空字符串
+- `iics_credentials.json` 不进 git（`.gitignore` 精确排除 `/iics_credentials.json`）
+- 不得把账号密码写进源码、README、测试、fixture、commit message
+- 可选逃生舱：`$env:IICS_CONFIG_FILE = "<repo 外路径>"`
+
+git 安全自检（每次改动认证相关文件后都应跑一遍）：
+
+```powershell
+git ls-files --error-unmatch iics_credentials.json   # 期望：失败（未被追踪）
+git status --short -- iics_credentials.json          # 期望：无输出
+git check-ignore -v iics_credentials.json            # 期望：命中 .gitignore 的 /iics_credentials.json
+git check-ignore -v iics_credentials.template.json   # 期望：无输出（模板未被忽略）
+python scripts/check_no_real_credentials.py          # 期望：exit 0
+```
+
+若第一条**成功**（说明真实文件已被 git 追踪）：**立即停止**，向负责人报告，
+不要自行 `git rm --cached` 或重写历史。
+
+### 3.2 首次环境绑定：auth-check → 人工确认 → auth-pin
+
+三个环境各做一次。**Agent 不得代替使用者确认。**
+
+```powershell
+python .\iics_cli.py auth-check --env TEST
+```
+
+期望 stdout（**恰好** 5 个顶层字段；不含 session ID、账号密码、账号 `id`
+或 Login 原始响应体）：
+
+```json
+{
+  "environment": "TEST",
+  "status": "pin_required",
+  "org_id": "000LVT",
+  "org_uuid": "<ORG_UUID>",
+  "server_host": "use4.dm-us.informaticacloud.com"
+}
+```
+
+人工操作提示走 **stderr**，不属于 stdout JSON contract：
+
+```text
+[IICS CLI] 环境 TEST 尚未绑定：请人工核对上面输出的 org_id / org_uuid ...
+```
+
+其余状态的 stdout key 集合：
+
+| status | stdout 顶层 key |
+|---|---|
+| `pin_required` | `environment` `status` `org_id` `org_uuid` `server_host` |
+| `pinned` | 上述 5 个 + `pinned_at` |
+| `pin_mismatch` | 上述 5 个 + `pinned_org_uuid` `error_type` `error`（exit 1） |
+
+人工核对 `org_id`：
+
+```text
+000LA8 → DEV
+000LVT → TEST
+000LVU → PROD
+```
+
+对不上 → **不要 pin**，先改正 `iics_credentials.json` 里的环境账号。
+
+核对无误后：
+
+```powershell
+python .\iics_cli.py auth-pin --env TEST
+```
+
+`auth-pin` 的 stdout key 集合：
+
+| status | stdout 顶层 key |
+|---|---|
+| `pinned` / `already_pinned` | `environment` `status` `org_id` `org_uuid` `server_host` `pinned_at` `pin_file` |
+| org 不一致且未 `--force` | `error` `error_type`（`EnvironmentMismatchError`，exit 1，pin 不被覆盖） |
+
+对 DEV / PROD 重复同样三步。
+
+绑定后验证 `.env_pins.json` 只含 org 身份：
+
+```powershell
+Get-Content .\.env_pins.json      # 应只有 schema_version / pins / org_uuid / org_id / pinned_at
+Select-String -Path .\.env_pins.json -Pattern "icSessionId|password|username|serverUrl"
+# 期望：无匹配
+```
+
+### 3.3 Legacy token 模式（仅排障，可跳过）
+
+```powershell
+$env:IICS_AUTH_MODE = "legacy_token"
+$env:IICS_SESSION_TOKEN = "<USER_SESSION 值>"
+```
+
+legacy 模式不解析环境、不受 environment pin 保护、无法自动 refresh。
+排障结束后应 `Remove-Item Env:IICS_AUTH_MODE` 还原主路径。
+
+> 安全要求：账号密码只存在于 `iics_credentials.json`（不进 git）；session 只存在于
+> CLI 进程内存，不落盘、不打印。Login 原始响应体（`roles` / `usergroups` /
+> `emails` / `securityQuestion` / `securityAnswer` / `password`）不得被保留或输出。
 
 ---
 
@@ -83,8 +195,9 @@ v0.1 的自动化测试分两层，本手册覆盖**集成层（真实 API 冒�
 ```powershell
 Set-Location -LiteralPath "D:\IICS Agent"
 git status --short          # 测试前：应只在末尾可能出现导出 .xlsx（被忽略，不入跟踪）
+$env:IICS_ENV = "TEST"      # 不设置则 smoke_test 直接失败（不默认 PROD）
 python smoke_test.py
-git status --short          # 测试后：不应出现任何源码改动
+git status --short          # 测试后：不应出现任何源码改动，且不应出现 iics_credentials.json
 ```
 
 若 `python smoke_test.py` 在此步失败，**先不要进入 Claude Code**，按第 7 节自行排查
@@ -149,9 +262,19 @@ python smoke_test.py
 
 ### 5.2 子命令逐个手动验证（交叉确认 CLI 协议）
 
+所有业务子命令都必须带环境（或已设置 `$env:IICS_ENV`）。
+
 ```powershell
-# A. 枚举（验证 stdout 纯 JSON、分页、type 过滤）
+$env:IICS_ENV = "TEST"
+
+# A0. 反例（Amendment 10）：不指定环境 → MissingEnvironmentError、exit 1、无 HTTP
+Remove-Item Env:IICS_ENV -ErrorAction SilentlyContinue
 python iics_cli.py list-tasks JAPAN_SCRM_DI --type DSS
+echo "exit=$LASTEXITCODE"   # 期望 1，且不得默认落到 PROD
+$env:IICS_ENV = "TEST"
+
+# A. 枚举（验证 stdout 纯 JSON、分页、type 过滤）
+python iics_cli.py --env TEST list-tasks JAPAN_SCRM_DI --type DSS
 echo "exit=$LASTEXITCODE"   # 期望 0；有 error 时为 1
 
 # B. 详情（三类型均需 --folder，Amendment 9：folder → FRS discovery 取 frs_id）
@@ -193,7 +316,7 @@ git status --short
 ```powershell
 # 与 Mode A 自然语言触发后台执行的命令完全一致，手动输入即可
 Set-Location -LiteralPath "D:\IICS Agent"
-$env:IICS_SESSION_TOKEN = "<USER_SESSION 值>"
+$env:IICS_ENV = "TEST"
 
 python iics_cli.py list-tasks JAPAN_SCRM_DI --type DSS
 python iics_cli.py get-task <真实TASK名> DSS --folder JAPAN_SCRM_DI
@@ -202,7 +325,7 @@ python iics_cli.py export JAPAN_COMMERCIAL_DWH --type ALL
 ```
 
 Mode C 没有 AI 层介入，不存在 prompt injection 或模型误调用风险；安全边界与 Mode A 完全
-一致（token 处理规则相同、`iics_cli.py` 本身无写路径），不需要额外的 `--allowedTools` 类
+一致（credential / session 处理规则相同、`iics_cli.py` 本身无写路径），不需要额外的 `--allowedTools` 类
 权限配置。
 
 ---
@@ -225,7 +348,11 @@ v0.1 **完成**当且仅当全部满足：
 - [ ] 至少一次 `export` 生成的 `.xlsx` 能用 Excel 打开；v0.1.1 起含
       `Task Summary`（列：name, type, folder, runtime_agent, source_conn,
       target_conn, source_objects, target_object, status）与 `Export Errors` 两个 sheet。
-- [ ] 四个子命令成功时退出码 0，工具返回 `{"error":...}` 时退出码 1。
+- [ ] 退出码契约对**所有** CLI 子命令成立：成功时退出码 0，工具返回顶层
+      `{"error":...}` 时退出码 1。适用范围——
+      业务 / 数据命令 `list-tasks` / `get-task` / `resolve-connection` / `export` /
+      `export-selected`，以及认证生命周期命令 `auth-check` / `auth-pin`
+      （后两者的 status 与 stdout 字段契约另见 §6.8）。
 - [ ] 全程无 token 出现在 stdout / 文件 / git。
 - [ ] 测试结束后 `git status --short` 不应出现源码改动；导出的 `.xlsx` 不应被 git 跟踪。
 
@@ -411,12 +538,92 @@ python .\iics_cli.py get-task <NAME> DSS --folder <FOLDER> --full   # 完整 det
 
 ---
 
+### 6.8 认证架构验收（Amendment 10 / 10.1）
+
+> **最终状态：Amendment 10 = ACCEPTED。** 自动化测试 87/87 PASS；
+> TEST = FULL REAL PATH PASS；DEV / PROD = ENVIRONMENT ONBOARDING PASS
+> （未执行真实 business GET，因无已确认存在且安全的 folder —— 属 test coverage
+> difference，不是 blocker）。三个环境的 pin 均已由使用者分别人工确认后绑定。
+> 下列清单保留作为**回归复核**用途。
+
+**A. mock 层（必须先全绿）**
+
+```powershell
+python -m unittest discover -s tests -t .
+```
+
+- [ ] 全部用例通过
+- [ ] 其中 GET-only 安全回归用例通过：`IICSClient._request("POST", ...)` 仍抛
+      `ValueError("v0.1 only supports GET requests")`，且**没有**发出任何 HTTP 请求
+- [ ] pin 文件不含 `username` / `password` / `icSessionId` / `serverUrl`
+- [ ] `SessionManager` 不持有 Login 原始响应体（`roles` / `usergroups` / `emails` /
+      `securityQuestion` / `securityAnswer` 均不出现）
+
+**B. 环境选择**
+
+- [ ] `--env TEST` 生效；`--env テスト` 等 alias 正确 normalize 为 `TEST`
+- [ ] 只设 `IICS_ENV` 也能工作；同时存在时 `--env` 优先
+- [ ] 两者都不提供 → `MissingEnvironmentError`、exit 1、**不落到 PROD**
+- [ ] 未知环境 → `UnknownEnvironmentError`
+- [ ] `--env DEV auth-check --env TEST` → `DuplicateEnvironmentArgumentError`、exit 1，
+      **且在读取 credential / 发起 Login 之前**就失败
+- [ ] `--env TEST auth-check --env TEST`（取值相同）同样被拒绝
+- [ ] `IICS_ENV=DEV` + `--env TEST` → 使用 TEST，**不**报 duplicate
+
+**C. Credential**
+
+- [ ] 配置文件缺失 / JSON 非法 → `CredentialConfigError`
+- [ ] 环境 username 或 password 为空 → `MissingCredentialsError`（**不会**拿空串去 Login）
+- [ ] stdout / stderr 全程无 username / password / icSessionId
+
+**D. Environment Pin**
+
+- [ ] 未 pin 的环境执行任何业务命令 → `EnvironmentPinRequiredError`、exit 1
+- [ ] `auth-check` 不写 pin；`pin_required` 时 stdout 顶层 key **恰好**是
+      `environment` / `status` / `org_id` / `org_uuid` / `server_host` 五个，
+      **不含** `next_step` 等人类提示字段（提示应出现在 stderr）
+- [ ] 任何 status 下 stdout 都**不含** `id` / `icSessionId` / 账号密码 /
+      `roles` / `usergroups` / `emails` / `securityQuestion` / `securityAnswer`
+- [ ] `auth-pin` 成功/幂等时 stdout 顶层 key 恰好为 `environment` / `status` /
+      `org_id` / `org_uuid` / `server_host` / `pinned_at` / `pin_file`
+- [ ] `auth-pin` 写入后，`.env_pins.json` 仅含 `org_uuid` / `org_id` / `pinned_at`
+- [ ] 已 pin 环境重复 `auth-pin` → 幂等，不重写
+- [ ] 故意把另一环境账号填进来 → `EnvironmentMismatchError`，且**不自动覆盖**已有 pin
+
+**E. 会话行为（真实环境）**
+
+- [ ] 一次 `export` 全程只登录一次（stderr 中 `[IICS auth]` 登录日志只出现一次）
+- [ ] 进程结束后仓库内**不存在** `session_cache.json` / `cached_session.json` 之类文件
+- [ ] 401 自动重新登录并重试一次后继续完成导出（可在 session 长时间空闲后触发观察）
+- [ ] 403 场景不触发重新登录（若有权限受限的 folder 可验证）
+
+**F. 只读回归（pin 完成后）**
+
+- [ ] `list-tasks` / `get-task` / `resolve-connection` / `export` / `export-selected`
+      输出与 Amendment 9 完全一致（列数、`task_count` / `rows` /
+      `failed_details_count` / `enrichment_warnings_count` 语义不变）
+
+**G. git 安全**
+
+- [ ] `git ls-files --error-unmatch iics_credentials.json` 失败（未被追踪）
+- [ ] `git status --short -- iics_credentials.json` 无输出
+- [ ] `git check-ignore -v iics_credentials.json` 命中 `/iics_credentials.json`
+- [ ] `git check-ignore -v iics_credentials.template.json` 无输出（模板可被跟踪）
+- [ ] `python scripts/check_no_real_credentials.py` exit 0
+
+---
+
 ## 7. 常见失败与排查
 
 | 现象 | 可能原因 | 处理 |
 |------|----------|------|
-| `{"error":"IICS_SESSION_TOKEN 未设置",...}` 退出码 1 | 环境变量没设或在新会话 | 在当前 PowerShell 重新 `$env:IICS_SESSION_TOKEN=...` |
-| 任意请求抛 `RuntimeError: IICS session expired...` | token 过期（401） | 浏览器重新取 `USER_SESSION` 再 export |
+| `{"error":"未指定 IICS 环境...","error_type":"MissingEnvironmentError"}` 退出码 1 | 没给 `--env`，`IICS_ENV` 也没设 | 加 `--env TEST`，或 `$env:IICS_ENV = "TEST"`。工具刻意不默认 PROD |
+| `DuplicateEnvironmentArgumentError` 退出码 1 | 同一条命令写了两次 `--env` | 只保留一个 `--env`；没有"后一个覆盖前一个"这种行为 |
+| `EnvironmentPinRequiredError` / `EnvironmentMismatchError` | 该环境未绑定，或本次 Login 的 org 与已绑定值不符 | 走 §3.2：`auth-check` → 人工核对 org → `auth-pin`；mismatch 时先查 credential 是否填错环境 |
+| `InvalidCredentialsError` | Login 被拒（401/403） | 检查该环境账号；工具刻意不自动重试，避免触发锁号 |
+| `AuthenticationError` | 自动重新登录后业务 GET 仍 401 | 确认该账号在目标 org 是否仍有效 |
+| `PermissionDeniedError` | 业务 GET 返回 403 | 权限不足；session 有效，工具正确地**不**重新登录 |
+| legacy 模式下 `RuntimeError: IICS session expired...` | `IICS_AUTH_MODE=legacy_token` 且手动 token 过期 | 浏览器重新取 `USER_SESSION` 重设，或改回默认的 `--env` 主路径 |
 | `list_tasks` 返回 `{"error":...}` 非空 | 文件夹名拼写 / 权限 / 分页参数 | 核对 folder 名；ADR 备注：`pageSize` 失败可改 `limit` 重试 |
 | Test 3 type 过滤为 0 但应有 task | V3 `type` 实际值与枚举不同 | 检查 `normalize_task_type` 映射，按实测值补充映射层 |
 | Test 4 SKIP | 目标文件夹该类型无 task | 用 `IICS_TEST_TASK_NAME` 指定真实 task |

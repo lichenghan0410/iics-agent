@@ -22,10 +22,64 @@ The project-wide architecture, safety boundary, authentication rules, critical
 IICS invariants, and working-directory behavior are defined in `CLAUDE.md`.
 This skill defines task-specific execution procedures.
 
+## Environment selection (required)
+
+Every business command runs against one explicitly selected IICS environment:
+
+```text
+python iics_cli.py --env <DEV|TEST|PROD> <subcommand> ...
+```
+
+Rules:
+
+- Pass `--env` only with the environment the user explicitly named.
+- Never default to `PROD`.
+- Never infer the environment from a folder name, username, serverUrl, or org name.
+- If the user has not named an environment and `IICS_ENV` is not set, ask the user
+  which environment to use instead of guessing. The CLI fails closed with
+  `MissingEnvironmentError`.
+- Pass `--env` **exactly once** per command. It may sit before or after the
+  subcommand, but never both: a repeated `--env` (even with the same value) fails
+  with `DuplicateEnvironmentArgumentError` and exit code 1. There is no
+  first-wins / last-wins fallback. `IICS_ENV` plus one `--env` is not a
+  duplicate — the command-line value wins by design.
+
+## First-time environment binding (must not be automated)
+
+```text
+python iics_cli.py auth-check --env <ENV>     # read-only: Login + show org identity
+python iics_cli.py auth-pin   --env <ENV>     # ONLY after the user confirms in chat
+```
+
+Procedure:
+
+1. Run `auth-check` and show the returned `org_id` / `org_uuid` / `server_host`.
+   Its stdout is machine-readable JSON only; the human follow-up instruction is
+   printed on stderr. When `status` is `pin_required`, stdout carries exactly
+   `environment`, `status`, `org_id`, `org_uuid`, `server_host` — do not expect
+   or invent a `next_step` field.
+2. **Stop. Wait for the user to confirm in writing that this org is the intended
+   environment.** Never confirm on the user's behalf.
+3. Only in a later turn, after that explicit confirmation, run `auth-pin`.
+
+Known `org_id` short codes for manual cross-check (not a strong identity value):
+
+```text
+000LA8 -> DEV
+000LVT -> TEST
+000LVU -> PROD
+```
+
+Never run `auth-pin --force`; re-binding an environment is a decision the user
+makes and executes.
+
+Never read, create, or edit `iics_credentials.json`, and never print a username,
+password, session ID, or the raw Login response.
+
 ## Available commands
 
 ```text
-python iics_cli.py list-tasks <folder> [--type DSS|MTT|WORKFLOW|ALL] [--page-size N]
+python iics_cli.py --env <ENV> list-tasks <folder> [--type DSS|MTT|WORKFLOW|ALL] [--page-size N]
 
 python iics_cli.py get-task <task_name> <task_type> --folder <folder> [--full] [--no-resolve]
 
@@ -653,6 +707,10 @@ Do not claim DSS/WORKFLOW folder-level V2 detail disambiguation.
 
 Do not expose session tokens or raw authentication material.
 
+Do not expose usernames, passwords, `icSessionId`, the account `id`, or any part
+of the raw Login response (`roles`, `usergroups`, `emails`, `securityQuestion`,
+`securityAnswer`, `password`).
+
 ---
 
 # 8. Failure handling
@@ -679,8 +737,22 @@ For enrichment warnings:
 - report the warning separately
 - do not count it as a primary detail failure
 
-If the session is expired or unauthorized, tell the operator to refresh the
-browser `USER_SESSION` and reset `IICS_SESSION_TOKEN` according to the project
-authentication instructions.
+Authentication-related error types and what to tell the operator:
+
+| `error_type` | Meaning | Report to operator |
+|---|---|---|
+| `MissingEnvironmentError` | No `--env` and no `IICS_ENV` | Ask which environment to use. Never pick one. |
+| `UnknownEnvironmentError` | Name/alias not in the credential config | Show the available environment keys. |
+| `DuplicateEnvironmentArgumentError` | `--env` given more than once in one command | Re-run with a single `--env`. Never guess which one was intended. |
+| `CredentialConfigError` | Config file missing or invalid JSON | Ask the operator to fix `iics_credentials.json` themselves. |
+| `MissingCredentialsError` | That environment's username/password is empty | Ask the operator to fill it in themselves. Never fill it in. |
+| `InvalidCredentialsError` | Login rejected (401/403) | Report it. Do not retry — repeated attempts can lock the account. |
+| `EnvironmentPinRequiredError` | Environment not bound yet | Run `auth-check`, show the org identity, and wait for explicit user confirmation. |
+| `EnvironmentMismatchError` | Login org differs from the pinned org | Stop. Report it. Never `--force`. |
+| `PermissionDeniedError` | HTTP 403, session valid but insufficient rights | Report it. The CLI correctly does not re-authenticate. |
+| `AuthenticationError` | Still 401 after one automatic re-login | Report it; the account may no longer be valid in that org. |
+
+Session refresh is automatic and process-local. Do not ask the operator for a
+browser `USER_SESSION` value on the default path.
 
 Follow `CLAUDE.md` for working-directory errors and safety restrictions.

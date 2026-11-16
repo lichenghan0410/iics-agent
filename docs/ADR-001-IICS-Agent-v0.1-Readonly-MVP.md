@@ -1,6 +1,6 @@
 # ADR-001: IICS Agent · v0.1 Read-only MVP
 
-**状态**: Accepted（含 Amendment 1–10.1；Amendment 10 认证架构修订已 ACCEPTED）
+**状态**: Accepted（含 Amendment 1–11；Amendment 10 认证架构修订已 ACCEPTED；Amendment 11 离线实施完成、真实环境待验证）
 **日期**: 2026-06-27
 **决策人**: Li（运维负责人）
 **参考文档**: `IICS_Agent_System_Design.md` v1.4（已通过三轮 review，评分 9/10）
@@ -12,6 +12,7 @@
 | 2026-06-27 | Accepted — v0.1 Mode A（Claude Code CLI，主）+ Mode B（Cowork，计划辅模式）；经一轮 ADR review（评分 8.6/10）修正 V2 path 契约、Smoke Test 断言阻断项，采纳 V3 params 规范、connection 抽取 best-effort、export sheet best-effort 标注等改进；D-1 扩展为双模式设计，新增 `iics_cli.py` / `CLAUDE.md` 契约 |
 | 2026-06-29 | v0.1 Mode A 真实 `USER_SESSION` token 联调通过（Step 1–9 完成，Smoke Test 1–6 全部通过）。联调中发现 6 项契约与实测不符（V3 路径、分页机制、`q` 语法大小写、按名消歧可行性等），记录于文末「Post-ADR 实测修正」 |
 | 2026-09-11 | **Amendment 10 / 10.1 — ACCEPTED**：D-2 认证架构由「手动 `USER_SESSION`」修订为 DEV/TEST/PROD 多环境非交互式自动 Login + TOFU `orgUuid` environment pin + process-local session + 业务 401 自动 refresh once；Amendment 10.1 修复 `auth-check` stdout contract 与重复 `--env` 的隐式优先级。实现、mock 测试与真实环境验收均已完成，详见文末三节 |
+| 2026-11-16 | **Amendment 11**：MTT 业务 schema 23 → 26 列（新增 `Last Run`、`Source Connection Parameter`、`Target Connection Parameter`）；连接展示「解析名称优先、`connDefault` 兜底」；MTT compact 将 enrichment warning 写入 stderr。DSS 12 / WORKFLOW 9 列不变。离线实施与 mock 测试完成，真实环境验证待用户指定，详见文末 |
 | 2026-06-30 | **Amendment 1**：① 移除 Mode B（`iics_agent.py` Cowork Interactive Agent），新增 Mode C（手动直接调用 `iics_cli.py`，零新增代码）作为辅模式，详见 D-1；② 将 2026-06-29 发现的 6 项实测偏差反向同步进 D-3 / D-4 / `tools/query.py` 契约正文及 Smoke Test 断言，消除正文与文末「Post-ADR 实测修正」附录不一致的问题 |
 
 > 说明：本次 Amendment 1 是对 v0.1 运行模式与契约准确性的修订，**不等同于进入 v0.2（Dry-run Update）**。v0.2 的范围（写操作 dry-run、`validate_update_preflight` 等）仍未启动，升级条件见文末。
@@ -1469,6 +1470,9 @@ id=classic/FRS ID=discovered、ALL 顺序、WORKFLOW child 2→2/0→1 每行重
 
 ### 列数订正 —— 当前 authoritative Excel schema（单一权威来源）
 
+> **历史记录（已被 Amendment 11 更新）**：下表为 Amendment 9 时点的快照。自 Amendment 11 起，
+> 当前列数权威来源为 Amendment 11 的「列数订正」小节（`MTT Task` = 26；DSS / WORKFLOW 不变）。
+
 Amendment 8 后文档基线曾滞后（WORKFLOW 8）。**自 Amendment 9 起，本小节是三张业务 sheet
 列数的唯一权威来源**，Amendment 5 / 7 / 8 中的列数均为各自当时的历史快照：
 
@@ -2011,3 +2015,133 @@ V2 / V3             = 共享同一个 Login session
 业务 401             = refresh once → rebuild URL/Header → retry once
 业务 403             = 不 refresh（PermissionDeniedError）
 ```
+
+---
+
+## Amendment 11 — MTT Last Run & Connection Parameter Columns
+
+**日期**：2026-11-16
+**状态**：离线实施完成（代码 + mock 测试 + 文档）；**真实环境验证未执行**（待用户指定环境）。
+**性质**：MTT 业务输出增量扩展。**不新增 endpoint / 依赖 / 命令 / CLI 选项，不改 detail route，
+不涉及写操作。** DSS 12 列、WORKFLOW 9 列及其查询 / 导出行为不变。
+
+### 决策
+
+1. **MTT schema 23 → 26 列**：插入 `Last Run`（`Task Updated On` 之后）、
+   `Source Connection Parameter`（`Source Connection` 之后）、`Target Connection Parameter`
+   （`Target Connection` 之后）。`get-task` MTT compact 与 Excel 共用同一 row builder，列名 /
+   顺序 / 值完全一致。**按固定列号读取文件的调用方需要调整**（后续列号移动）。
+2. **Last Run**：唯一来源 MTT `raw.lastRunTime`。实测为 epoch 毫秒（与官方「UTC ISO」约定不符，
+   见 API Notes §7.7.1）；输出固定 UTC `yyyy-MM-ddTHH:mm:ss.SSSZ`。ISO 字符串只接受明确定义的
+   子集 `YYYY-MM-DD(T|t|空格)HH:MM[:SS[.f{1,6}]](Z|±HH:MM|±HHMM)`（项目自带解析，3.10+ 一致）。
+   缺失 / null / `""` / `0` →
+   `null`（不宣称从未运行、不告警）；数值字符串 / 非法 / 布尔 / 负数 / 非有限 / 越界 / 无时区 →
+   `null` + warning。不用 `updateTime` / activityLog 补值，不解释为最近成功运行时间。
+3. **连接参数（兼容解析，非官方字段）**：`uiProperties.connectionParameterized` 明确 true/false
+   优先（安全解析字符串）；缺失时仅以 `paramType-mapping == "Connection"` 或
+   `runtimeParameterData.connectionParameterName` 为证据；参数名 `connectionParameterName` 优先、
+   fallback `paramName`，不从 `name` / `label` / `paramLabel` / `logcnx` 推断。
+   `isConnectionRuntimeParameter` 仅原样映射，语义未确认。
+4. **Connection 列优先级**：真实解析名称 → `connDefault`（仅确认参数化）→ connection ID；
+   `--no-resolve` 恒为 ID。「真实解析名称」按 resolver 记录的**名称来源**判定（响应是否含
+   `name` / `connectionName`，与名称一起缓存）：请求失败或响应无名称（resolver 以 id / `""`
+   兜底）视为无名称；真实名称即使恰好等于 ID 也照常展示。公开 `resolve_connection()` 输出、
+   `resolve-connection` CLI 与 DSS 调用方契约不变；`iics_client.py` 未改。
+   使用 MTT 专用显示函数，共用 `_conn_display()`（DSS 使用）不变。（review 修正，见下文）
+5. **Parameter 列取值**：明确非参数化 → `""`；参数化 → 参数名（缺名 `null`）；状态未知 → `null`；
+   对侧 → `""`。
+6. **展开规则不变**：仍以 `sourceConnectionId` / `targetConnectionId` 为依据，保序、不去重；
+   **未按 `type` 严格过滤**（Lookup 等同名字段存在条件性误分类风险，本次不修复）。明确参数化但缺少
+   ID 的 SOURCE/TARGET 项只记 1 条 warning，不新增行；不恢复无 ID 行。
+7. **warning**：Last Run 非法、参数化缺名、字段冲突、连接名称降级、参数化缺 ID 均为 enrichment
+   warning（不计入 `failed_details_count`、不中止导出）。结构
+   `{kind, transformation_name, field, error_type: "EnrichmentError", error}`；`error` 文本以
+   `<transformation> / <field>: ...`（任务级为 `Last Run: ...`）开头，保证 Export Errors 可定位。
+   同一 transformation 的同一字段最多 1 条；请求失败沿用既有 `kind: connection`，`connDefault`
+   兜底时不另加；仅响应无名称（ID 兜底）时为该字段记 1 条 `connection_parameter`。
+8. **MTT compact stderr（行为变化）**：MTT 默认 compact 开始把全部 `enrichment_warnings`（含既有
+   runtime / mapping / connection）经 `_log()` 写入 stderr，每条一行
+   `[IICS CLI] WARNING {kind}: {error}`；stdout 顶层仍只有 `task_count` / `rows` / `records`。
+   `--full` 与 JSON 导出保留结构化 warning；Excel 复用 Export Errors。
+
+### normalized detail 增量
+
+任务级 `last_run: str | null`；适用侧 `source_connection` / `target_connection` 在既有
+`id` / `name` 之外增加 `parameterized`、`parameter_name`、`configured_value`
+（`uiProperties.connDefault`）、`is_connection_runtime_parameter`、`display_value`；`name` 仅保存
+真实解析名称。row builder 仅消费 normalized 字段。不增加旧 normalized JSON 回读兼容路径
+（仓库无该入口）。
+
+### 入口影响
+
+| 入口 | 结果 |
+|---|---|
+| `get-task` MTT 默认 | 26 列 records；warning → stderr |
+| `get-task` MTT `--full` | normalized detail 增量字段 + `raw` + 结构化 warning |
+| `export` MTT / ALL | MTT sheet 26 列；sheet 名称 / 顺序 / Export Errors 不变 |
+| `export --format json` | 整份 data，`details` 含新增 normalized 字段 |
+| `export-selected` | 复用底层，无代码改动；MTT 文件 26 列 |
+| `export --summary-only` | 新增列为空，不抓取详情 |
+| `get-task --no-resolve` | Connection 为 ID；Parameter 与 Last Run 照常（`export` 无此选项） |
+
+### 列数订正 —— 当前 authoritative Excel schema
+
+| 业务 sheet | 当前列数 |
+|---|---|
+| `MTT Task` | **26**（23 + `Last Run` / `Source Connection Parameter` / `Target Connection Parameter`） |
+| `DSS Tasks` | **12**（不变） |
+| `Workflow Tasks` | **9**（不变） |
+
+Amendment 9 的列数表保留为历史快照。
+
+### 不做（本次范围外）
+
+DSS Last Run（已取消，不承诺用日志或 HTML 补值）、activityLog、HTML 抓取、参数文件读取、运行时
+连接还原、废弃任务判定、Lookup 分类修复、无 ID 行恢复。输出的连接是**任务配置值**，不保证是某次
+运行最终使用的连接。
+
+### 已验证（离线）
+
+- 改动前：基线 87/87；新增特征测试 13 项在未改动代码上全部通过（DSS 12 / WORKFLOW 9 / MTT 23）。
+- 初版实施后：完整套件 165/165（Python 3.11 与 3.13）；同一版本在 Python 3.10 为 164/165（见下文
+  review 修正 2）。
+- review 修正后：完整套件 **187/187**（Python 3.10.20 / 3.11.18 / 3.13.18）；DSS / WORKFLOW 特征
+  测试未修改；MTT 特征测试仅插入 3 列。凭据扫描 OK。
+- 样本 `mt_DWH_TO_REG_V_DMF_SSA_FACT_RESULT_QUICK`（fixture 级）：Last Run
+  `2026-11-12T06:58:54.000Z`（两行重复）；Source Connection `rsh_gdm_e2e_TEC`、Parameter
+  `parameter_rsh_gdm_e2e`；Target Parameter `""`；Target Connection 取 resolver 结果
+  （ID `000LVU0B0000000001VU`，未预填名称）。
+
+### 待验证（真实环境）
+
+见 Runbook §6.9：本例真实核对；Target 参数化任务与完全非参数化任务；「参数化但未勾选运行时覆盖」
+样本以确认 `isConnectionRuntimeParameter` / `connectionParameterName` 含义；仅 taskflow 触发的
+MTT 的 `lastRunTime` 更新行为；`JPN_COMM_DWH_DL.PARAM` 中 `parameter_rsh_gdm_e2e` 的定义与生效值
+（人工确认，代码不读取参数文件）。
+
+### Amendment 11 review 修正（2026-11-16，两个阻断项）
+
+**修正 1 — 真实连接名称与 ID fallback 的区分。** 初版实现采用名称与 ID 相等的启发式判断
+（`resolved[id]` 为空或等于 ID 本身即视为无名称）。本轮 review 将其替换为 resolver 记录名称来源，
+并保留缓存来源信息；原启发式会把真实名称恰好等于 ID 的连接误判为无名称，错误地展示 `connDefault`
+并告警「returned no name」。修正：
+
+- `tools/query.py`：新增内部 `_resolve_connection_entries()`，在 `resolved` / `failed` 之外返回
+  `has_name[id]`（值是否来自响应的 `name` / `connectionName`）；公开 `resolve_connection()` 改为
+  包装它，输出仍只有 `{resolved, failed}`，值不变。`_real_connection_name()` 只依据 `has_name`
+  与 `failed` 判定，删除「名称 == ID」比较。
+- `cache/connection_cache.py`：`ConnectionCache` 增加来源记录（`get_entry` /
+  `get_or_fetch_entry`；`set()` 增加可选 `has_name`）。旧 `get` / `set` / `get_or_fetch` 行为与
+  返回值不变；失败仍不缓存。仅由旧 `set()` 写入、缺少来源信息的条目会补一次 fetch（项目内无此
+  写入路径）。
+- `resolve-connection` CLI、DSS 调用方的输出契约与缓存行为不变（测试覆盖）。
+
+**修正 2 — Python 3.10 的 Last Run ISO 解析。** 初版依赖 `datetime.fromisoformat`：3.10 只接受
+`isoformat()` 输出（拒绝 1/2/4/5 位小数秒），3.11+ 又额外接受 basic 格式等，跨版本行为不一致
+（3.10 下 1 项测试失败）。修正为项目自带的显式子集解析（`_ISO_DATETIME_RE` /
+`_parse_iso_datetime`，标准库 `re` + `datetime`，无新增依赖），3.10 / 3.11 / 3.13 行为一致；
+支持与不支持格式见 API Notes §7.7.1。注意：3.11+ 上原本被接受的 basic 格式等，现按子集定义
+返回 `null` + warning（有意统一）。`requirements.txt` 仍为 Python >= 3.10。
+
+**测试**：修复前新增测试在 3.10 / 3.11 / 3.13 分别 16+2 / 13+2 / 12+2 项失败（复现缺陷）；
+修复后全套 187/187（三版本）。原有失败测试 `test_iso_with_offset_normalized_to_utc` 未删除、未改期望。

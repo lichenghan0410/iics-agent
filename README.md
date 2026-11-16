@@ -299,7 +299,7 @@ python iics_cli.py get-task <task_name> <task_type> --folder <folder> [--full] [
 | `<task_type>` | はい | `DSS` / `MTT` / `WORKFLOW` |
 | `--folder` | **はい** | 3 type すべてで必須。対象 task object を正確に特定するために使用 |
 | `--full` | いいえ | 完全 detail を返す。diagnostic 用で、日常利用では不要 |
-| `--no-resolve` | いいえ | connection ID を name に解決せず、raw ID のみ表示 |
+| `--no-resolve` | いいえ | connection ID を name に解決せず、Connection 列は raw ID のみ表示。MTT の Connection Parameter と Last Run は通常どおり出力（`export` にはこの option はなく、常に解決する） |
 
 #### DSS
 
@@ -341,6 +341,20 @@ default も簡潔な business field を返します。**1 Source または Targe
 - original order を保持し、deduplicate せず、first / last のみを切り出さない
 
 MTT detail query は具体的な object を正確に特定するため、**異なる folder にある同名 MTT を確実に区別できます**。DSS のような same-name ambiguity はありません。
+
+MTT record は 26 列で、うち 3 列が Amendment 11 で追加されました。
+
+| 列 | 意味 |
+|---|---|
+| `Last Run` | task の last run time。常に UTC（`yyyy-MM-ddTHH:mm:ss.SSSZ`、例：`2026-11-12T06:58:54.000Z` = 日本時間 15:58:54）。同一 task の全 row で同じ値を繰り返す。空欄は「値がない」ことのみを意味し、**未実行を意味しない**。「最後に成功した実行」とも解釈しない |
+| `Source Connection Parameter` / `Target Connection Parameter` | その側の connection parameter 名。`""` = 明示的に parameter 化されていない、`null`（Excel では空欄）= parameter 化済みだが名前なし、または状態不明。反対側は常に `""` |
+
+`Source Connection` / `Target Connection` の値の優先順位：解決された connection name → task 設定の default connection（`connDefault`、parameter 化が確認された connection のみ）→ connection ID。`--no-resolve` では常に ID。
+
+注意：
+
+- 出力されるのは **task の設定値** であり、ある実行で最終的に使われた connection であることは保証しません（parameter file で上書きされる可能性があり、本 tool は parameter file を読みません）。
+- default の compact mode では、MTT の enrichment warning（runtime / mapping / connection / Last Run / connection parameter）を 1 件 1 行で **stderr** に出力します（`[IICS CLI] WARNING {kind}: {error}`）。stdout は引き続き `task_count` / `rows` / `records` のみ。構造化 warning が必要な場合は `--full`。
 
 #### WORKFLOW
 
@@ -388,10 +402,12 @@ task type ごとに Excel column structure が異なります。
 | type | 列数 | 1 row の意味 |
 |---|---:|---|
 | DSS | 12 | 1 task = 1 row |
-| MTT | 23 | 1 Source または Target transformation = 1 row |
+| MTT | 26 | 1 Source または Target transformation = 1 row |
 | WORKFLOW | 9 | 1 child task = 1 row。child がなくても 1 row を保持 |
 
 `--type ALL` では固定順で複数 business sheet を生成します：`MTT Task → DSS Tasks → Workflow Tasks → Export Errors`。
+
+**MTT 列番号の変更**：Amendment 11 で MTT sheet に `Last Run`（`Task Updated On` の後）、`Source Connection Parameter`（`Source Connection` の後）、`Target Connection Parameter`（`Target Connection` の後）を挿入したため、以降の列番号が後ろにずれます。固定列番号で Excel を読む script や数式は調整が必要です。`--summary-only` は detail を取得しないため、この 3 列は空欄です。
 
 #### Export が完全成功したか判断する方法
 
@@ -475,7 +491,7 @@ result JSON には以下が含まれます。
 すべての command は共通 output contract に従います。
 
 - **stdout**：machine-readable JSON result — parse / use すべき内容
-- **stderr**：progress log。human-readable で、business data は含まない
+- **stderr**：progress log と diagnostic warning（MTT compact mode の `WARNING ...` 行など）。human-readable で、business data は含まない
 - command normal completion：exit code `0`
 - top-level `{"error": ...}`：exit code `1`。command 全体の failure を意味する
 
@@ -491,6 +507,9 @@ batch operation（`export` / `export-selected`）では command 自体の exit c
 - **MTT はこの制限を受けない**：cross-folder same-name でも正確に区別できる。
 - **Mapping Location field は現時点で reliable data source がない**ため、推測値は表示しない。
 - **`rows` と `task_count` は異なる統計単位**であり、`rows` が大きくなるのは正常。
+- **MTT の connection / connection parameter は task の設定値**であり、ある実行で実際に使われた connection とは限らない（parameter file による上書きの可能性）。
+- **MTT transformation の展開は `sourceConnectionId` / `targetConnectionId` で判断し、type で厳密に filter していない**：同名 field を持つ他の type（Lookup など）が条件次第で Source/Target row に誤分類される可能性がある。parameter 化済みで connection ID がない項目は warning のみで row は生成しない。
+- **DSS の Last Run は提供しない**（要件は取り消し済み）。
 
 ---
 

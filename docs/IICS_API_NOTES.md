@@ -358,6 +358,97 @@ classic detail 无法保证是同一 folder 的对象（summary warning 提示�
 > - 编排层可用 `task_id=<frs_id> + task_id_type="frs"` 跳过二次 discovery（三类型一致；CLI/selected
 >   不暴露）。**未新增** `POST /public/core/v3/lookup` 或 `/export`（现有 GET `/objects` 已够）。
 
+### 7.7 MTT Last Run 与 Connection Parameter（Amendment 11，真实样本 + 兼容解析）
+
+真实样本：`mt_DWH_TO_REG_V_DMF_SSA_FACT_RESULT_QUICK`（`GET mttask/frs/{frs_id}`；Source 参数化、
+Target 非参数化）。**未新增 endpoint**，三个新字段全部来自同一份 MTT FRS detail。
+
+#### 7.7.1 `lastRunTime`（实测与官方约定不符）
+
+```
+createTime  = "2021-11-17T23:57:11.000Z"   ← ISO 字符串
+updateTime  = "2026-10-28T03:12:56.000Z"   ← ISO 字符串
+lastRunTime = 1794466734000                ← epoch 毫秒（JSON number）
+```
+
+- 官方 REST API「所有 date/time 以 UTC ISO 返回」的约定**不适用于此字段**：同一响应中
+  `lastRunTime` 实测为 epoch **毫秒**。`1794466734000` → `2026-11-12T06:58:54.000Z`
+  （日本时间 2026-11-12 15:58:54）。
+- 项目解析（`parse_last_run_time`）：唯一来源 `raw.lastRunTime`；输出固定 UTC
+  `yyyy-MM-ddTHH:mm:ss.SSSZ`，不依赖执行机本地时区。正数 number 按毫秒（不猜测为秒）；
+  带时区 ISO 转 UTC；缺失 / null / 空字符串 / `0` → `null` 且不告警（**不宣称「从未运行」**）；
+  数值字符串、非法字符串、布尔、负数、非有限、越界、无时区日期时间 → `null` + warning。
+- **支持的 ISO 输入格式**（项目自带解析，不依赖 `datetime.fromisoformat`；Python 3.10 / 3.11 /
+  3.13 行为一致）：`YYYY-MM-DD(T|t|空格)HH:MM[:SS[.f{1,6}]](Z|z|±HH:MM|±HHMM)`。
+  时区必填；秒可省略；小数秒 1–6 位（右补零到微秒，输出**截断**到毫秒）；偏移 `hh ≤ 23`、`mm ≤ 59`。
+  **不支持**（→ `null` + warning）：basic 格式（如 `20261112T065854Z`）、仅日期、小数秒 > 6 位、
+  `±HH`、逗号小数、闰秒 `:60`、日历越界、转 UTC 后越界。早期实现依赖 `fromisoformat`，在 3.10
+  无法解析 1/2/4/5 位小数秒、在 3.11+ 却接受 basic 格式，跨版本不一致，已改为上述显式子集。
+- 不用 `updateTime` 或 activityLog 补值；**不解释为「最近成功运行时间」**。
+- 仅由 taskflow 触发的 MTT，`lastRunTime` 是否更新、与前端 Last Run 是否一致 **待验证**。
+- DSS Last Run **已取消**，不计划用日志或 HTML 补值。
+
+#### 7.7.2 `parameters[].uiProperties` / `runtimeParameterData`（非官方公开字段）
+
+`uiProperties` 与 `runtimeParameterData` 的相关键**不在官方 mttask 公开字段表中**，本项目只按已知
+样本做**兼容解析**，不得把命名推测当作官方语义。样本（Source 侧）：
+
+```
+uiProperties.connectionParameterized = "true"          ← 字符串，非 JSON boolean
+uiProperties.connDefault             = "rsh_gdm_e2e_TEC"
+uiProperties.paramName               = "parameter_rsh_gdm_e2e"
+uiProperties.paramType-mapping       = "Connection"
+runtimeParameterData.connectionParameterName     = "parameter_rsh_gdm_e2e"
+runtimeParameterData.isConnectionRuntimeParameter = true
+label = "parameter_rsh_gdm_e2e"; uiProperties.logcnx = "parameter_rsh_gdm_e2e"
+```
+
+Target 侧：`connectionParameterized = "false"`，无 `connDefault` / `paramName`，
+`isConnectionRuntimeParameter = false`。
+
+- **参数化判定**：`connectionParameterized` 可解析为明确 true/false（JSON boolean 或去空白、
+  忽略大小写的 `"true"`/`"false"`；禁止 `bool("false")`）时以其为准；缺失时仅当
+  `paramType-mapping == "Connection"` 或 `connectionParameterName` 非空才判 true，否则未知
+  （`null`）；非法值 → `null` + warning；明确 false 与参数名冲突 → false + warning。
+- **参数名**：仅对确认参数化的一侧提取，`connectionParameterName` 优先，fallback
+  `uiProperties.paramName`；冲突取前者 + warning。**不从** `parameters[].name` / `label` /
+  `paramLabel` / `logcnx` 推断。
+- `isConnectionRuntimeParameter` 原样安全解析为 normalized `is_connection_runtime_parameter`，
+  **不参与** parameterized 判定；它是否对应 UI「Allow parameter to be overridden at runtime」
+  **尚未确认**（需「参数化但未勾选运行时覆盖」的样本），不增加别名或 Excel 列。
+
+#### 7.7.3 Connection 列取值与「真实解析名称」的来源判定
+
+默认：**真实解析名称 → `connDefault`（仅限确认参数化）→ connection ID**；`--no-resolve`：ID
+（不调用 resolver、不用 `connDefault` 代替 ID）。
+
+`GET connection/{id}` 响应无 `name` / `connectionName` 时，resolver 按既有契约以
+`id → ""` 兜底，兜底值同样进入 `resolved`，**仅凭值无法区分「真实名称恰好等于 ID」与
+「响应只有 ID」**。因此判定**不比较名称与 ID**，而是由 resolver 记录名称来源：
+
+- 内部 `_resolve_connection_entries()` 额外返回 `has_name[id]`：该值是否真的来自响应的
+  `name` / `connectionName`（与既有 `or` 链同一真值判断）。
+- `ConnectionCache` 同时缓存名称与来源（`get_or_fetch_entry` / `get_entry`），缓存命中时来源
+  信息不丢失、不重复请求；旧接口 `get` / `set` / `get_or_fetch` 行为不变。
+- MTT 判定：id 在 `failed` 或不在 `resolved` → 无真实名称；`has_name[id]` 不为 True → resolver
+  兜底、无真实名称；否则即真实名称，**即使它恰好等于 connection ID**。
+- 公开 `resolve_connection()`（`resolve-connection` CLI、DSS 调用方）输出仍只有
+  `{resolved, failed}`，值与此前完全相同；来源信息不进入其输出。
+
+> 订正：初版实现采用名称与 ID 相等的启发式判断（`resolved[id]` 等于 id 本身即视为无名称）。
+> 本轮 review 将其替换为 resolver 记录名称来源，并保留缓存来源信息。原启发式会把真实名称恰好
+> 等于 ID 的连接误判为无名称、错误地展示 `connDefault` 并告警「returned no name」。
+> 现行规则不再包含任何「名称 == ID」比较。
+
+**输出的是任务配置值**，不承诺是某次运行最终使用的连接：参数文件（如本例
+`JPN_COMM_DWH_DL.PARAM`）可能在允许覆盖且生效值不同时覆盖连接；项目**不读取参数文件**。
+
+#### 7.7.4 展开规则的已知风险（本次不修复）
+
+transformation 展开只看 `sourceConnectionId` / `targetConnectionId` 是否存在，**未按 `type`
+严格过滤**。若 Lookup 等其它类型带同名字段，存在条件性误分类风险。明确参数化但缺少
+connection ID 的 SOURCE/TARGET 项只记 warning（`kind: connection_parameter`），**不生成行**。
+
 ---
 
 ## 8. 对 ADR-001「v2 前需重新确认项」的结论
@@ -382,3 +473,6 @@ classic detail 无法保证是同一 folder 的对象（summary warning 提示�
   仍走 V2 by-name 无 folder 约束**（`dsstask/{frs_id}` / `workflow/{frs_id}` 返回 500，不可用）——
   detail 的 folder 消歧仍未解决（见 §7.6 Amendment 9 注）。
 - 写操作（update/batch）的 PARTIAL UPDATE 行为——v0.1 严格只读，未触碰。
+- （Amendment 11）`isConnectionRuntimeParameter` / `connectionParameterName` 的实际含义（需
+  「连接参数化但未勾选运行时覆盖」样本）；Target 参数化任务与完全非参数化任务的真实样本核对；
+  taskflow 触发的 MTT 的 `lastRunTime` 更新行为与前端一致性（见 §7.7）。

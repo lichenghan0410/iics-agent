@@ -236,6 +236,10 @@ def _cmd_get_task(client, args) -> dict:
     # WORKFLOW 保持现状（扁平 dict）。返回结构因 task_type 而异，脚本调用先判 task_type。
     if not getattr(args, "full", False):
         if args.type == "MTT":
+            # Amendment 11：compact 不含 enrichment_warnings，故全部写入 stderr（每条一行）；
+            # stdout 顶层仍只有 task_count / rows / records。
+            for w in detail.get("enrichment_warnings") or []:
+                _log(f"WARNING {w.get('kind', '')}: {w.get('error', '')}")
             rows = build_task_summary_rows(detail, args.folder)
             records = [compact_record(r) for r in rows]
             return {"task_count": 1, "rows": len(records), "records": records}

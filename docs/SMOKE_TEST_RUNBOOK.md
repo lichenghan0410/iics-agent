@@ -74,7 +74,13 @@ python -m unittest discover -s tests -t .
 
 全部通过才继续。该套件完全 mock，不触网、不使用真实账号密码，覆盖环境解析、
 credential config、Login、environment pin、401 refresh、403 不 refresh，
-以及 **GET-only 安全回归**。
+以及 **GET-only 安全回归**；Amendment 11 起另含业务输出特征测试
+（`tests/test_export_characterization.py`：DSS 12 / WORKFLOW 9 / MTT 26 列）与
+MTT 字段测试（`tests/test_mtt_fields.py`）。随后执行凭据扫描：
+
+```powershell
+python scripts/check_no_real_credentials.py
+```
 
 ### 3.1 填写 credential 配置（只能由使用者本人完成）
 
@@ -443,19 +449,20 @@ Transformation（只来自 MTT `parameters[]`）：
 
 - [ ] 一次 export 内同一 `connectionId` / `mappingId` / `runtimeEnvironmentId` 只请求一次。
 
-### 6.4 MTT compact / --full 与 23 列（Amendment 4 / 9）
+### 6.4 MTT compact / --full 与 26 列（Amendment 4 / 9 / 11）
 
 get-task：
 
 - [ ] 默认 `get-task NAME MTT --folder F` 返回 `{task_count, rows, records[]}`；`records` 每条
-      恰为 22 个 Task Summary 业务字段（一个 transformation = 一条 record）。
+      恰为 26 个 Task Summary 业务字段（一个 transformation = 一条 record；Amendment 11 起）。
 - [ ] 默认 compact **不含** `raw` / `frs_id` / `detail_route` / `enrichment_warnings`。
 - [ ] `--full` 返回完整 normalized detail（含 `raw` / `frs_id` / `detail_route` / `transformations`）。
 - [ ] DSS / WORKFLOW `get-task` 仍为扁平 dict（无 `records`），结构与 MTT 不对称。
 
 Excel / schema：
 
-- [ ] `Task Summary` header 恰为 **23 列**（Amendment 9：`id` 后含 `FRS ID`），**不含 `Mapping Location`**。
+- [ ] `Task Summary` header 恰为 **26 列**（Amendment 9：`id` 后含 `FRS ID`；Amendment 11：
+      `Last Run`、`Source Connection Parameter`、`Target Connection Parameter`），**不含 `Mapping Location`**。
 - [ ] compact record 与 Excel 单元格 **字段名与值一致**（同一 row builder）。
 - [ ] normalized detail 的 `task_mapping.location` 仍为 `null`（`--full` 可见）。
 
@@ -610,6 +617,43 @@ python -m unittest discover -s tests -t .
 - [ ] `git check-ignore -v iics_credentials.json` 命中 `/iics_credentials.json`
 - [ ] `git check-ignore -v iics_credentials.template.json` 无输出（模板可被跟踪）
 - [ ] `python scripts/check_no_real_credentials.py` exit 0
+
+### 6.9 MTT Last Run / Connection Parameter（Amendment 11）
+
+> 离线实施已由 mock 测试覆盖；以下为**真实环境待验证项**，须由用户明确指定环境并满足认证 /
+> pin 规则后，通过正式 CLI 只读执行。不读取参数文件、不启动任务。
+
+样本 `mt_DWH_TO_REG_V_DMF_SSA_FACT_RESULT_QUICK`（Source 参数化、Target 非参数化）：
+
+```powershell
+python .\iics_cli.py --env <ENV> get-task mt_DWH_TO_REG_V_DMF_SSA_FACT_RESULT_QUICK MTT --folder <folder>
+```
+
+- [ ] 2 条 record（Source / Target），两行 `Last Run` 均为 `2026-11-12T06:58:54.000Z`
+      （`raw.lastRunTime = 1794466734000`，epoch 毫秒；固定 UTC、三位毫秒、`Z`）。
+- [ ] Source：`Source Connection = rsh_gdm_e2e_TEC`、`Source Connection Parameter = parameter_rsh_gdm_e2e`；
+      Target 侧两列为 `""`。
+- [ ] Target：`Target Connection` 为真实 resolver 对 `000LVU0B0000000001VU` 的结果（不预填名称）；
+      `Target Connection Parameter = ""`；Source 侧两列为 `""`。
+- [ ] Custom Query 保留；dummy Source Object 仍隐藏（`""`）。
+- [ ] stdout 顶层只有 `task_count` / `rows` / `records`；enrichment warning（若有）出现在 stderr，
+      每条一行 `[IICS CLI] WARNING {kind}: {error}`。
+- [ ] `--no-resolve`：Connection 列为原始 ID，不出现 `connection/` 请求；Parameter 与 Last Run 照常；
+      无因跳过解析产生的 warning。
+- [ ] 只有响应确实缺少 `name` / `connectionName` 时才出现 `returned no name` warning；若遇到名称恰好
+      等于 ID 的 connection，应照常展示该名称且不出现此 warning（判定依据名称来源，不比较名称与 ID）。
+- [ ] `export <folder> --type MTT`：`Task Summary` 26 列，值与 compact 一致；`--summary-only` 新增列为空。
+- [ ] Last Run / 参数名缺失 / 冲突 / 名称降级 warning 只计入 `enrichment_warnings_count`，
+      `failed_details_count` 不增加；Export Errors 文本含 transformation 名与字段名。
+
+补充样本（待用户提供）：
+
+- [ ] 一个 Target 参数化任务、一个完全非参数化任务。
+- [ ] 「连接参数化但未勾选运行时覆盖」的任务：确认 `isConnectionRuntimeParameter` 与
+      `connectionParameterName` 的实际含义（mock 不能替代该结论）。
+- [ ] 仅由 taskflow 触发的 MTT：比较既有运行后的 `raw.lastRunTime` 与前端 Last Run（不主动触发执行）。
+- [ ] 本例 `JPN_COMM_DWH_DL.PARAM`：人工确认有效作用域中是否定义 `parameter_rsh_gdm_e2e`
+      （仅「存在定义」不足以证明实际连接不同，还需允许覆盖且生效值不同；无定义时采用任务值）。
 
 ---
 

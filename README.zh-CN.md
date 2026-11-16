@@ -432,7 +432,7 @@ python iics_cli.py get-task <task_name> <task_type> --folder <folder> [--full] [
 | `<task_type>` | 是 | `DSS` / `MTT` / `WORKFLOW` |
 | `--folder` | **是** | 三种类型都必需，用于精确定位对应的 task 对象 |
 | `--full` | 否 | 返回完整详情，用于诊断；日常查询不需要 |
-| `--no-resolve` | 否 | 不把 connection ID 解析成名称，只看原始 ID |
+| `--no-resolve` | 否 | 不把 connection ID 解析成名称，Connection 列只显示原始 ID；MTT 的 Connection Parameter 与 Last Run 照常输出（`export` 没有此选项，始终解析） |
 
 #### DSS
 
@@ -474,6 +474,20 @@ python iics_cli.py get-task TASK_NAME MTT --folder JAPAN_SCRM_BAU
 - 保留原始顺序，不去重，不会只截取第一条或最后一条
 
 MTT 的详情查询会精确定位到具体对象，因此**可以可靠区分不同 folder 中的同名 MTT**，不存在 DSS 那种"同名歧义"的问题。
+
+每条 MTT 记录共 26 列，其中 3 列为 Amendment 11 新增：
+
+| 列 | 含义 |
+|---|---|
+| `Last Run` | 该任务的最近运行时间，固定为 UTC（`yyyy-MM-ddTHH:mm:ss.SSSZ`，如 `2026-11-12T06:58:54.000Z`，即日本时间 15:58:54）；同一任务的每一行重复同一值。为空只表示没有可用值，**不代表从未运行**，也不代表"最近一次成功运行" |
+| `Source Connection Parameter` / `Target Connection Parameter` | 该侧连接的参数名。`""` = 明确未参数化；`null`（Excel 空白）= 已参数化但缺名，或状态未知；对侧一律为 `""` |
+
+`Source Connection` / `Target Connection` 的取值顺序：解析出的连接名称 → 任务配置的默认连接（`connDefault`，仅限确认参数化的连接）→ connection ID；`--no-resolve` 时始终为 ID。
+
+注意：
+
+- 这里输出的是**任务配置值**，不保证是某次运行最终实际使用的连接（参数文件可能覆盖，本工具不读取参数文件）。
+- 默认精简模式下，MTT 的补充信息警告（runtime / mapping / connection / Last Run / 连接参数）会逐条写到 **stderr**（`[IICS CLI] WARNING {kind}: {error}`），stdout 仍只有 `task_count` / `rows` / `records`。需要结构化警告时加 `--full`。
 
 #### WORKFLOW
 
@@ -521,10 +535,12 @@ python iics_cli.py export <folder> [--type DSS|MTT|WORKFLOW|ALL] [--details|--su
 | 类型 | 列数 | 一行代表什么 |
 |---|---:|---|
 | DSS | 12 | 1 个 task = 1 行 |
-| MTT | 23 | 1 个 Source 或 Target transformation = 1 行 |
+| MTT | 26 | 1 个 Source 或 Target transformation = 1 行 |
 | WORKFLOW | 9 | 1 个子任务 = 1 行；没有子任务时仍保留 1 行 |
 
 `--type ALL` 会生成固定顺序的多个业务 sheet：`MTT Task → DSS Tasks → Workflow Tasks → Export Errors`。
+
+**MTT 列号变化提醒**：Amendment 11 在 MTT 表中插入了 `Last Run`（`Task Updated On` 之后）、`Source Connection Parameter`（`Source Connection` 之后）、`Target Connection Parameter`（`Target Connection` 之后），其后的列号整体后移。如果有按固定列号读取 Excel 的脚本或公式，需要相应调整。`--summary-only` 不查详情，这 3 列为空。
 
 #### 怎么判断导出是否完整成功
 
@@ -613,7 +629,7 @@ Python 只接受这样格式的 JSON 输入：
 所有命令遵循统一的输出约定：
 
 - **stdout**：机器可读的 JSON 结果——这是你应该解析和使用的内容
-- **stderr**：过程日志，人类阅读用，不包含业务数据
+- **stderr**：过程日志与诊断警告（如 MTT 精简模式的 `WARNING ...` 行），人类阅读用，不包含业务数据
 - 命令正常完成：退出码 `0`
 - 出现顶层 `{"error": ...}`：退出码 `1`，代表这次命令整体失败
 
@@ -631,6 +647,9 @@ Python 只接受这样格式的 JSON 输入：
 - **MTT 不受此限制**：可以在跨 folder 同名的情况下准确区分。
 - **Mapping Location 字段当前没有可靠数据来源**，不会显示推测值。
 - **`rows` 和 `task_count` 是两个不同的统计口径**，`rows` 更大是正常现象。
+- **MTT 的连接与连接参数是任务配置值**，不保证等于某次运行实际使用的连接（参数文件可能覆盖）。
+- **MTT transformation 展开按 `sourceConnectionId` / `targetConnectionId` 判断，未严格按类型过滤**：带同名字段的其它类型（如 Lookup）在特定情况下可能被误归为 Source/Target 行。明确参数化但缺少 connection ID 的项只记警告，不生成行。
+- **DSS 不提供 Last Run**（该需求已取消）。
 
 ---
 

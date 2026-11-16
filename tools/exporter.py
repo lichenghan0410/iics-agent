@@ -21,18 +21,19 @@ from pathlib import Path
 from openpyxl import Workbook
 from openpyxl.styles import Alignment
 
-# MTT 专属 Task Summary 列（Amendment 9：23 列，id 后插入 FRS ID）
+# MTT 专属 Task Summary 列（Amendment 11：26 列）
+# Amendment 9 在 id 后插入 FRS ID（23 列）；Amendment 11 插入 Last Run /
+# Source Connection Parameter / Target Connection Parameter（后续列号移动）。
 # id = classic V2 ID；FRS ID = FRS object ID（V3 discovery）。
 MTT_HEADERS = [
     "@type", "id", "FRS ID", "orgId",
     "Task Name", "Task Type", "Task Location", "Runtime Environment",
-    "Task Updated On",
-    "Mapping Name", "Mapping Updated On",
-    "Transformation Name", "Source Connection", "Source Object", "Custom Query",
-    "Target Connection", "Operation", "Target Object",
+    "Task Updated On", "Last Run",
+    "Mapping Name", "Mapping Updated On", "Transformation Name",
+    "Source Connection", "Source Connection Parameter", "Source Object", "Custom Query",
+    "Target Connection", "Target Connection Parameter", "Operation", "Target Object",
     "Parameter File Directory", "Parameter File Name",
-    "Pre-Processing Commands", "Post-Processing Commands",
-    "Status",
+    "Pre-Processing Commands", "Post-Processing Commands", "Status",
 ]
 _COLS = MTT_HEADERS  # 内部私有别名（过渡）；对外/跨文件一律用 MTT_HEADERS
 _SOURCE_OBJECT_COL = MTT_HEADERS.index("Source Object")  # 0-based；用于 wrap text
@@ -68,6 +69,30 @@ def _conn_display(conn) -> str:
     if not isinstance(conn, dict):
         return ""
     return conn.get("name") or conn.get("id") or ""
+
+
+def _mtt_conn_display(conn) -> str:
+    """MTT 专用 Connection 列（Amendment 11）：只消费 normalized display_value。
+
+    display_value 由 query 层按「真实解析名称 → connDefault（仅确认参数化）→ ID」
+    （--no-resolve 时为 ID）决定；缺失时退回 name → id。不影响 DSS 共用的 _conn_display。
+    """
+    if not isinstance(conn, dict):
+        return ""
+    return conn.get("display_value") or conn.get("name") or conn.get("id") or ""
+
+
+def _mtt_conn_param_display(conn):
+    """MTT Connection Parameter 列：明确非参数化 → ""；参数化 → parameter_name
+    （缺名为 None）；状态未知 / 缺失 → None。"""
+    if not isinstance(conn, dict):
+        return ""
+    parameterized = conn.get("parameterized")
+    if parameterized is False:
+        return ""
+    if parameterized is True:
+        return conn.get("parameter_name")
+    return None
 
 
 def _val_to_str(v) -> str:
@@ -167,6 +192,8 @@ def _task_level_row(rec: dict, top_folder: str) -> dict:
     # 缺失（情形 A）→ None（compact JSON 为 null；Excel 空白）
     row["Runtime Environment"] = rt_name
     row["Task Updated On"] = rec.get("task_updated_on", "")
+    # Amendment 11：缺失（summary-only / 主详情失败占位 / 无值）→ None
+    row["Last Run"] = rec.get("last_run")
     row["Mapping Name"] = mapping.get("name")
     row["Mapping Updated On"] = mapping.get("updated_on")
     row["Parameter File Directory"] = pf.get("directory")
@@ -186,10 +213,11 @@ def _task_level_row(rec: dict, top_folder: str) -> dict:
 
 
 def build_task_summary_rows(rec: dict, top_folder: str = "") -> list:
-    """一条 normalized detail / task 记录 → 若干 Task Summary 行（23 列 dict）。
+    """一条 normalized detail / task 记录 → 若干 Task Summary 行（MTT 26 列 dict）。
 
     CLI 的 MTT compact get-task 与 Excel export 共用此 row builder，保证字段/值一致。
     对侧不适用字段（情形 B）填 ""；缺失的可选字段（情形 A）保持 None。
+    只消费 normalized 字段（transformations / last_run），不重新扫描 raw。
     """
     base = _task_level_row(rec, top_folder)
     is_mtt = rec.get("task_type") == "MTT" or rec.get("type") == "MTT"
@@ -204,18 +232,22 @@ def build_task_summary_rows(rec: dict, top_folder: str = "") -> list:
         row["Transformation Name"] = t.get("name") or ""
         if t.get("kind") == "source":
             sc = t.get("source_connection")
-            row["Source Connection"] = _conn_display(sc) if sc else ""
+            row["Source Connection"] = _mtt_conn_display(sc) if sc else ""
+            row["Source Connection Parameter"] = _mtt_conn_param_display(sc) if sc else ""
             row["Source Object"] = t.get("source_object")   # str / list / "" / None
             row["Custom Query"] = t.get("custom_query")
             row["Target Connection"] = ""   # 对侧不适用 → ""
+            row["Target Connection Parameter"] = ""
             row["Operation"] = ""
             row["Target Object"] = ""
         else:  # target
             tc = t.get("target_connection")
-            row["Target Connection"] = _conn_display(tc) if tc else ""
+            row["Target Connection"] = _mtt_conn_display(tc) if tc else ""
+            row["Target Connection Parameter"] = _mtt_conn_param_display(tc) if tc else ""
             row["Operation"] = t.get("operation")
             row["Target Object"] = t.get("target_object")
             row["Source Connection"] = ""   # 对侧不适用 → ""
+            row["Source Connection Parameter"] = ""
             row["Source Object"] = ""
             row["Custom Query"] = ""
         out.append(row)
@@ -329,7 +361,7 @@ def _cell(v):
     return v
 
 
-# 供 CLI compact get-task 使用：与 Excel 完全相同的列名与单元格值（默认 MTT 22 列）
+# 供 CLI compact get-task 使用：与 Excel 完全相同的列名与单元格值（默认 MTT 26 列）
 TASK_SUMMARY_COLUMNS = list(MTT_HEADERS)
 
 
@@ -430,7 +462,7 @@ def export_results(
             business_sheets = [("Task Summary", DSS_HEADERS, _dss_rows(records))]
         elif export_type == "ALL":
             # ALL（Amendment 7）：三个独立业务 sheet，固定顺序
-            # MTT Task(23) → DSS Tasks(12) → Workflow Tasks(9)，再 Export Errors
+            # MTT Task(26) → DSS Tasks(12) → Workflow Tasks(9)，再 Export Errors
             mtt_recs = [r for r in records if _is_mtt(r)]
             dss_recs = [r for r in records if _is_dss(r)]
             wf_recs = [r for r in records if _is_wf(r)]
@@ -440,7 +472,7 @@ def export_results(
                 ("Workflow Tasks", WORKFLOW_HEADERS, _wf_rows(wf_recs)),
             ]
         else:
-            # MTT 单类型 / 其它：MTT 22 列
+            # MTT 单类型 / 其它：MTT 26 列
             business_sheets = [("Task Summary", MTT_HEADERS, _mtt_rows(records))]
 
         rows = sum(len(rws) for _, _, rws in business_sheets)

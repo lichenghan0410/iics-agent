@@ -268,6 +268,39 @@ For Target transformations:
 - Operation
 - Target Object
 
+### MTT Last Run and Connection Parameter (Amendment 11)
+
+Each MTT record has 26 columns, including:
+
+- `Last Run`: Python's normalized UTC value
+  (`yyyy-MM-ddTHH:mm:ss.SSSZ`) from the task's own `lastRunTime`.
+  It repeats on every row of the task. `null` means "no value available";
+  do not report it as "never run", and do not describe it as the last
+  successful run. Do not substitute `Task Updated On` or logs.
+- `Source Connection Parameter` / `Target Connection Parameter`:
+  `""` = explicitly not parameterized, a name = parameterized,
+  `null` = parameterized but name missing, or status unknown.
+  The opposite side of a row is always `""`.
+- `Source Connection` / `Target Connection`: Python chooses
+  resolved connection name → task's configured default (`connDefault`,
+  only for a confirmed parameterized connection) → connection ID.
+  With `--no-resolve` it is always the connection ID.
+
+These are task configuration values. Do not claim that a connection is the
+one actually used by a specific run: a parameter file may override it, and
+the tool does not read parameter files.
+
+Do not reinterpret `uiProperties` / `runtimeParameterData` from `raw`; these
+are not documented public fields. Do not claim that
+`is_connection_runtime_parameter` means "Allow parameter to be overridden at
+runtime" — that meaning is unconfirmed.
+
+In default compact mode, MTT enrichment warnings are printed to stderr, one
+per line (`[IICS CLI] WARNING {kind}: {error}`). They are diagnostics, not
+business data; stdout still holds only `task_count` / `rows` / `records`.
+Mention relevant warnings to the user as warnings, not as failures. Use
+`--full` when structured warnings are needed.
+
 Do not infer Mapping Location from Task Location. Mapping Location is currently
 unresolved unless Python explicitly returns a reliable value.
 
@@ -434,11 +467,21 @@ Do not manually reconstruct the DSS workbook or schema.
 
 ## MTT export
 
-MTT uses its dedicated 23-column business schema.
+MTT uses its dedicated 26-column business schema (Amendment 11 added
+`Last Run`, `Source Connection Parameter` and `Target Connection Parameter`;
+later column positions moved).
 
 One valid Source or Target transformation produces one business row.
 
 A task can therefore produce multiple rows.
+
+A parameterized Source/Target without a connection ID produces a warning,
+not a row. `--summary-only` leaves the new columns empty.
+
+Row expansion is decided by `sourceConnectionId` / `targetConnectionId`, not
+strictly by parameter `type`; other types carrying the same fields may be
+misclassified. Report this as a known limitation if relevant; do not fix it
+by hand.
 
 Use Python-normalized transformations and values. Do not reconstruct
 transformations from raw MTT or Mapping payloads.
